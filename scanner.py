@@ -302,6 +302,11 @@ def check_mac(url: str, mac: str, timeout: int = 5,
         result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
 
+    except requests.exceptions.Timeout:
+        result["error"] = "Timeout"
+        result["codes"].append(-1)
+        result["elapsed_ms"] = (time.time() - t_start) * 1000
+        return result
     except requests.exceptions.ProxyError:
         result["error"] = "Proxy error"
         result["codes"].append(0)
@@ -316,6 +321,41 @@ def check_mac(url: str, mac: str, timeout: int = 5,
         result["error"] = str(e)[:80]
         result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
+
+
+def count_channels_quick(url: str, mac: str, timeout: int = 5,
+                         proxy: str = None) -> int:
+    """Quick channel count — handshake + single page fetch.
+    Returns total_items count or 0 on failure."""
+    try:
+        token, _ = get_handshake(url, mac, timeout=timeout, proxy=proxy)
+        if not token:
+            return 0
+        cookies = make_cookies(mac)
+        params = {
+            "mac": mac, "user": mac, "password": mac,
+            "action": "get_ordered_list", "type": "itv",
+            "p": "1", "JsHttpRequest": "1-xml",
+            "force_ch_link_check": "", "fav": "0",
+            "genre": "*", "sortby": "number",
+        }
+        headers = {
+            "User-Agent": random_user_agent(),
+            "Accept": "*/*",
+            "Authorization": f"Bearer {token}",
+        }
+        res = _request_get(url, params=params, headers=headers,
+                           cookies=cookies, timeout=timeout, proxy=proxy)
+        if res.status_code == 200:
+            js = res.json().get("js", {})
+            total = js.get("total_items", 0)
+            try:
+                return int(total)
+            except (ValueError, TypeError):
+                return len(js.get("data", []))
+        return 0
+    except Exception:
+        return 0
 
 
 # ── Channel / IPTV / VOD functions ───────────────────────

@@ -1,32 +1,15 @@
 """
 Flipper — MAC Address Scanner + IPTV Player
-Plain Tkinter — macOS compatible.
+Plain Tkinter — Windows compatible.
 Features: mpv embedded player, proxy rotation with full retry,
 session persistence, profiles with naming, channel search,
-navigation stack, progress bar, account info tab, keep-on-top.
+navigation stack, progress bar, account info tab, settings tab,
+channel count filter, channel cache.
 """
 
 import os
 import sys
-import subprocess
 import platform
-import configparser
-
-if sys.platform == "darwin":
-    os.environ["TK_SILENCE_DEPRECATION"] = "1"
-    # Homebrew on Apple Silicon installs to /opt/homebrew; ctypes.util.find_library
-    # often fails to locate libmpv there. Patch it before importing mpv.
-    import ctypes, ctypes.util
-    _orig_find = ctypes.util.find_library
-    def _patched_find_library(name):
-        result = _orig_find(name)
-        if result is None and name == "mpv":
-            for p in ("/opt/homebrew/lib/libmpv.dylib",
-                       "/usr/local/lib/libmpv.dylib"):
-                if os.path.isfile(p):
-                    return p
-        return result
-    ctypes.util.find_library = _patched_find_library
 
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog
@@ -48,12 +31,13 @@ from scanner import (
     fetch_free_proxies, set_proxy_list, get_proxy_list, add_proxy,
     remove_proxy, get_current_proxy, rotate_proxy, report_proxy_fail,
     report_proxy_success, should_remove_proxy, make_cookies, make_params,
-    random_user_agent, _request_get,
+    random_user_agent, _request_get, count_channels_quick,
 )
 from constants import RESULTS_FILE, SESSION_FILE
 
 MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
+CHANNELS_CACHE_FILE = "channels_cache.json"
 BG_DARK = "#0a0a1e"
 BG_SIDEBAR = "#1a1a2e"
 BG_INPUT = "#12122a"
@@ -104,6 +88,8 @@ class App:
 
         # Settings
         self.verbose_logs_var = tk.BooleanVar(value=False)
+        self.use_proxy_var = tk.BooleanVar(value=True)
+        self.min_channels = 0
         self.save_folder = ""  # empty = current directory
 
         # Account info
@@ -176,7 +162,8 @@ class App:
         self.tab_btns = []
         self.tab_pages = []
         tab_labels = ["📋 Logi", "✅ Aktywne MAC", "🌐 Proxy",
-                       "📺 Player", "👤 Profile", "ℹ️ Info"]
+                       "📺 Player", "👤 Profile", "ℹ️ Info",
+                       "⚙️ Ustawienia"]
         for i, label in enumerate(tab_labels):
             b = self._make_btn(tab_bar, label, "#333355", "#444466",
                                lambda idx=i: self._switch_tab(idx))
@@ -251,7 +238,7 @@ class App:
                        activeforeground="#cccccc",
                        font=("Helvetica", 10)).pack(side=tk.LEFT)
 
-        tk.Checkbutton(cb_frame, text="Zawsze na wierzchu",
+        tk.Checkbutton(cb_frame, text="Na wierzchu",
                        variable=self.keep_on_top_var, bg=BG_SIDEBAR,
                        fg="#aaaaaa", selectcolor=BG_INPUT,
                        activebackground=BG_SIDEBAR,
@@ -259,6 +246,28 @@ class App:
                        font=("Helvetica", 10),
                        command=self._toggle_keep_on_top).pack(
             side=tk.LEFT, padx=(6, 0))
+
+        tk.Checkbutton(cb_frame, text="Proxy",
+                       variable=self.use_proxy_var, bg=BG_SIDEBAR,
+                       fg="#aaaaaa", selectcolor=BG_INPUT,
+                       activebackground=BG_SIDEBAR,
+                       activeforeground="#cccccc",
+                       font=("Helvetica", 10)).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+        # Min channels filter
+        min_ch_frame = tk.Frame(left, bg=BG_SIDEBAR)
+        min_ch_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+        tk.Label(min_ch_frame, text="Min. kanałów:",
+                 font=("Helvetica", 10, "bold"),
+                 bg=BG_SIDEBAR, fg="#c8c8e0").pack(side=tk.LEFT)
+        self.min_channels_entry = tk.Entry(
+            min_ch_frame, font=("Helvetica", 10), width=6,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.min_channels_entry.pack(side=tk.LEFT, padx=(4, 0), ipady=2)
+        self.min_channels_entry.insert(0, "0")
 
         # Export button
         self._make_btn(left, "📁 Eksportuj wyniki", "#333355", "#444466",
@@ -421,16 +430,18 @@ class App:
         tf.pack(fill=tk.BOTH, expand=True)
 
         self.tree = ttk.Treeview(
-            tf, columns=("url", "mac", "expiry", "proxy"),
+            tf, columns=("url", "mac", "expiry", "channels", "proxy"),
             show="headings")
         self.tree.heading("url", text="URL")
         self.tree.heading("mac", text="Adres MAC")
         self.tree.heading("expiry", text="Data ważności")
+        self.tree.heading("channels", text="Kanały")
         self.tree.heading("proxy", text="Proxy")
-        self.tree.column("url", width=260, minwidth=120)
-        self.tree.column("mac", width=180, minwidth=120)
-        self.tree.column("expiry", width=220, minwidth=120)
-        self.tree.column("proxy", width=180, minwidth=100)
+        self.tree.column("url", width=220, minwidth=120)
+        self.tree.column("mac", width=160, minwidth=120)
+        self.tree.column("expiry", width=200, minwidth=120)
+        self.tree.column("channels", width=70, minwidth=50)
+        self.tree.column("proxy", width=160, minwidth=100)
 
         tsb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tsb.set)
@@ -620,9 +631,10 @@ class App:
 
         if not HAS_MPV:
             tk.Label(self.player_frame,
-                     text="Zainstaluj mpv (brew install mpv)\n"
-                          "oraz pip install python-mpv\n"
-                          "aby korzystać z wbudowanego odtwarzacza",
+                     text="Zainstaluj mpv:\n"
+                          "1) Pobierz z https://mpv.io/installation/\n"
+                          "2) Dodaj mpv do PATH\n"
+                          "3) pip install python-mpv",
                      font=("Helvetica", 14), bg="#000000", fg="#555577",
                      justify=tk.CENTER).place(relx=0.5, rely=0.5,
                                               anchor=tk.CENTER)
@@ -791,6 +803,25 @@ class App:
 
         self._sep_dark(page)
 
+        # Use proxy checkbox
+        proxy_cb_frame = tk.Frame(page, bg=BG_DARK)
+        proxy_cb_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        tk.Checkbutton(proxy_cb_frame,
+                       text="Używaj proxy podczas skanowania",
+                       variable=self.use_proxy_var, bg=BG_DARK,
+                       fg="#d0d0e8", selectcolor=BG_INPUT,
+                       activebackground=BG_DARK,
+                       activeforeground="#ffffff",
+                       font=("Helvetica", 12)).pack(anchor=tk.W)
+        tk.Label(proxy_cb_frame,
+                 text="Gdy wyłączone, skaner łączy się bezpośrednio "
+                      "bez proxy. Timeout automatycznie usuwa proxy.",
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
+                 wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(2, 0))
+
+        self._sep_dark(page)
+
         # Save folder
         folder_frame = tk.Frame(page, bg=BG_DARK)
         folder_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
@@ -818,6 +849,22 @@ class App:
                  wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(4, 0))
 
+        self._sep_dark(page)
+
+        # Clear channel cache button
+        cache_frame = tk.Frame(page, bg=BG_DARK)
+        cache_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        self._make_btn(cache_frame, "🗑 Wyczyść cache kanałów",
+                       "#cc3333", "#aa2222",
+                       self._clear_channels_cache).pack(
+            anchor=tk.W, ipady=3, ipadx=6)
+        tk.Label(cache_frame,
+                 text="Usuwa zapisane listy kanałów. Następnym razem "
+                      "kanały zostaną pobrane z serwera.",
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
+                 wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(4, 0))
+
     def _sep_dark(self, parent):
         tk.Frame(parent, height=1, bg="#333355").pack(
             fill=tk.X, padx=20, pady=8)
@@ -831,6 +878,38 @@ class App:
             self.save_folder_entry.delete(0, tk.END)
             self.save_folder_entry.insert(0, folder)
             self._log(f"Folder zapisu: {folder}", "info")
+
+    # ══════════════════════════════════════════════════════
+    #  CHANNEL CACHE
+    # ══════════════════════════════════════════════════════
+
+    def _channels_cache_path(self):
+        return (os.path.join(self.save_folder, CHANNELS_CACHE_FILE)
+                if self.save_folder else CHANNELS_CACHE_FILE)
+
+    def _load_channels_cache(self):
+        path = self._channels_cache_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_channels_cache(self, cache):
+        try:
+            with open(self._channels_cache_path(), "w",
+                      encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _clear_channels_cache(self):
+        path = self._channels_cache_path()
+        if os.path.exists(path):
+            os.remove(path)
+        self._log("Cache kanałów wyczyszczony.", "info")
 
     # ══════════════════════════════════════════════════════
     #  WIDGET HELPERS
@@ -978,11 +1057,13 @@ class App:
                     continue
             self.tree.insert("", tk.END,
                              values=(m["url"], m["mac"],
-                                     m["expiry"], m.get("proxy", "")))
+                                     m["expiry"],
+                                     m.get("channels", "?"),
+                                     m.get("proxy", "")))
 
-    def _add_active_mac(self, url, mac, expiry, proxy=None):
+    def _add_active_mac(self, url, mac, expiry, proxy=None, channels=0):
         entry = {"url": url, "mac": mac, "expiry": expiry,
-                 "proxy": proxy or ""}
+                 "proxy": proxy or "", "channels": channels}
         self.active_macs.append(entry)
         if proxy:
             self.mac_proxy_map[mac] = proxy
@@ -991,7 +1072,9 @@ class App:
     def _insert_mac_row(self, entry):
         self.tree.insert("", tk.END,
                          values=(entry["url"], entry["mac"],
-                                 entry["expiry"], entry["proxy"]))
+                                 entry["expiry"],
+                                 entry.get("channels", "?"),
+                                 entry["proxy"]))
         self.mac_count_label.configure(
             text=f"Znaleziono: {len(self.active_macs)}")
 
@@ -1065,6 +1148,7 @@ class App:
             f.write(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             for m in self.active_macs:
                 f.write(f"{m['mac']} | {m['expiry']} | {m['url']} | "
+                        f"ch={m.get('channels', '?')} | "
                         f"{m.get('proxy', '')}\n")
         self._log(f"Wyeksportowano {len(self.active_macs)} wyników.",
                   "success")
@@ -1079,6 +1163,7 @@ class App:
                 f.write("# Flipper — auto-zapis\n")
                 for m in self.active_macs:
                     f.write(f"{m['mac']} | {m['expiry']} | {m['url']} | "
+                            f"ch={m.get('channels', '?')} | "
                             f"{m.get('proxy', '')}\n")
         except Exception:
             pass
@@ -1105,6 +1190,8 @@ class App:
             "found_count": self.found_count,
             "verbose_logs": self.verbose_logs_var.get(),
             "save_folder": self.save_folder,
+            "use_proxy": self.use_proxy_var.get(),
+            "min_channels": self.min_channels_entry.get(),
         }
         try:
             save_path = (os.path.join(self.save_folder, SESSION_FILE)
@@ -1172,6 +1259,11 @@ class App:
 
         if "verbose_logs" in data:
             self.verbose_logs_var.set(data["verbose_logs"])
+        if "use_proxy" in data:
+            self.use_proxy_var.set(data["use_proxy"])
+        if "min_channels" in data:
+            self.min_channels_entry.delete(0, tk.END)
+            self.min_channels_entry.insert(0, data["min_channels"])
         saved_folder = data.get("save_folder", "")
         if saved_folder:
             self.save_folder = saved_folder
@@ -1184,6 +1276,8 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _get_active_proxy(self):
+        if not self.use_proxy_var.get():
+            return None
         inline = self.proxy_inline_entry.get().strip()
         if inline:
             if not inline.startswith("http"):
@@ -1578,6 +1672,32 @@ class App:
     def _fetch_channels_worker(self, url_raw, mac, proxy):
         timeout = self._get_timeout()
         url = parse_url(url_raw)
+        cache_key = f"{url}|{mac}|{self.player_content_type}"
+
+        # Try cache first
+        cache = self._load_channels_cache()
+        cached = cache.get(cache_key)
+        if cached:
+            self.player_channels = cached.get("channels", [])
+            self.player_genres = cached.get("genres", [])
+            count = len(self.player_channels)
+            self._log_safe(
+                f"Załadowano {count} kanałów z cache "
+                f"({self.player_content_type}).", "info")
+            self._set_progress(100, f"Cache: {count} kanałów")
+            self.root.after(0, self._populate_genre_menu)
+            self.root.after(0, self._populate_channel_tree)
+            self.root.after(0, lambda: self.player_status_label.configure(
+                text=f"{count} kanałów (cache)"))
+
+            # Still do handshake for token
+            self._set_progress(90, "Handshake...")
+            token, _ = get_handshake(
+                url, mac, timeout=timeout, proxy=proxy)
+            if token:
+                self.player_token = token
+                self._fetch_account_info_worker(url, mac, token, proxy)
+            return
 
         self._set_progress(30, "Handshake...")
         token, hs_code = get_handshake(url, mac, timeout=timeout, proxy=proxy)
@@ -1624,6 +1744,13 @@ class App:
         self.root.after(0, self._populate_channel_tree)
         self.root.after(0, lambda: self.player_status_label.configure(
             text=f"{len(all_items)} kanałów"))
+
+        # Save to cache
+        cache[cache_key] = {
+            "channels": all_items,
+            "genres": genres,
+        }
+        self._save_channels_cache(cache)
 
         # Also fetch account info
         self._fetch_account_info_worker(url, mac, token, proxy)
@@ -1833,9 +1960,7 @@ class App:
             return
         try:
             wid = str(int(self.player_frame.winfo_id()))
-            if sys.platform == "darwin":
-                vo = "libmpv"
-            elif sys.platform == "win32":
+            if sys.platform == "win32":
                 vo = "gpu"
             else:
                 vo = "x11"
@@ -2152,9 +2277,11 @@ class App:
 
         result = check_mac(url, mac, timeout=timeout, proxy=proxy)
         codes = result.get("codes", [])
-        codes_str = "/".join(str(c) for c in codes) if codes else "?"
+        # Show only the last (most relevant) HTTP code
+        last_code = codes[-1] if codes else "?"
         elapsed = result.get("elapsed_ms", 0)
         time_tag = f"{elapsed:.1f}ms"
+        error_msg = result.get("error", "")
 
         self.checked_count += 1
         self._update_stats_safe()
@@ -2168,17 +2295,53 @@ class App:
             if res_info:
                 self._log_safe(f"  ⬅ {res_info[:300]}", "dim")
 
+        # Timeout → remove proxy and rotate
+        if error_msg == "Timeout" and proxy:
+            self._log_safe(
+                f"⏱ Timeout {time_tag} → usuwam proxy: {proxy}",
+                "warning")
+            remove_proxy(proxy)
+            self.root.after(0, self._refresh_proxy_tree)
+            new_proxy = rotate_proxy()
+            if new_proxy:
+                self._log_safe(f"Zmiana proxy → {new_proxy}", "info")
+            return
+
         if result["found"]:
             if proxy:
                 report_proxy_success(proxy)
+
+            # Check channel count
+            ch_count = 0
+            try:
+                ch_count = count_channels_quick(
+                    url, mac, timeout=timeout, proxy=proxy)
+            except Exception:
+                pass
+
+            # Min channels filter
+            try:
+                min_ch = int(self.min_channels_entry.get().strip())
+            except (ValueError, AttributeError):
+                min_ch = 0
+
+            if min_ch > 0 and ch_count < min_ch:
+                self._log_safe(
+                    f"⚠ [{last_code}] {time_tag} {mac} → "
+                    f"{ch_count} kanałów (min: {min_ch}), pomijam",
+                    "warning")
+                return
+
             self.found_count += 1
             self._update_stats_safe()
             self._log_safe(
-                f"✅ [{codes_str}] {time_tag} ZNALEZIONO: {mac} → "
-                f"{result['expiry']}", "success")
-            self._add_active_mac(url, mac, result["expiry"], proxy)
+                f"✅ [{last_code}] {time_tag} ZNALEZIONO: {mac} → "
+                f"{result['expiry']} ({ch_count} kanałów)", "success")
+            self._add_active_mac(url, mac, result["expiry"], proxy,
+                                 channels=ch_count)
             self._auto_save()
         else:
+            # Handle proxy failures for bad codes
             for code in codes:
                 if code and should_remove_proxy(code) and proxy:
                     self._handle_proxy_fail(proxy, code)
@@ -2186,12 +2349,12 @@ class App:
 
             if self.checked_count % 25 == 0:
                 self._log_safe(
-                    f"[{codes_str}] {time_tag} Sprawdzono "
+                    f"[{last_code}] {time_tag} Sprawdzono "
                     f"{self.checked_count}, "
                     f"znaleziono {self.found_count}...", "info")
             else:
                 self._log_safe(
-                    f"[{codes_str}] {time_tag} {mac}", "dim")
+                    f"[{last_code}] {time_tag} {mac}", "dim")
 
     def _scan_finished(self):
         self.is_running = False
