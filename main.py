@@ -302,6 +302,7 @@ class App:
 
         # Account info
         self.account_info_text = ""
+        self._is_closing = False
 
         self._setup_styles()
         self._build_gui()
@@ -2656,7 +2657,12 @@ class App:
         except Exception as e:
             self._log_safe(f"Błąd: {e}", "error")
         finally:
-            self.executor.shutdown(wait=False, cancel_futures=True)
+            if self.executor:
+                try:
+                    self.executor.shutdown(wait=True, cancel_futures=True)
+                except Exception:
+                    pass
+                self.executor = None
             self._scan_finished()
 
     def _check_single_mac(self, url, mac_prefix, timeout):
@@ -2797,15 +2803,36 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _on_close(self):
+        if self._is_closing:
+            return
+        self._is_closing = True
+
         self.stop_event.set()
         self.pause_event.set()
+
+        if self.executor:
+            try:
+                self.executor.shutdown(wait=True, cancel_futures=True)
+            except Exception:
+                pass
+            self.executor = None
+
+        if self.scan_thread and self.scan_thread.is_alive():
+            try:
+                self.scan_thread.join(timeout=2)
+            except Exception:
+                pass
+
         if self.mpv_player:
             try:
                 self.mpv_player.terminate()
             except Exception:
                 pass
+            self.mpv_player = None
+
         self._save_session()
         self._auto_save()
+        self.root.quit()
         self.root.destroy()
 
     def run(self):
