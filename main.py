@@ -1,9 +1,9 @@
 """
 Flipper — MAC Address Scanner + IPTV Player
 Plain Tkinter — macOS compatible.
-Features: proxy rotation, session persistence, profiles, embedded VLC player,
-channel search, navigation stack, progress bar, external player chooser,
-account info tab, keep-on-top, channel sorting.
+Features: mpv embedded player, proxy rotation with full retry,
+session persistence, profiles with naming, channel search,
+navigation stack, progress bar, account info tab, keep-on-top.
 """
 
 import os
@@ -14,9 +14,22 @@ import configparser
 
 if sys.platform == "darwin":
     os.environ["TK_SILENCE_DEPRECATION"] = "1"
+    # Homebrew on Apple Silicon installs to /opt/homebrew; ctypes.util.find_library
+    # often fails to locate libmpv there. Patch it before importing mpv.
+    import ctypes, ctypes.util
+    _orig_find = ctypes.util.find_library
+    def _patched_find_library(name):
+        result = _orig_find(name)
+        if result is None and name == "mpv":
+            for p in ("/opt/homebrew/lib/libmpv.dylib",
+                       "/usr/local/lib/libmpv.dylib"):
+                if os.path.isfile(p):
+                    return p
+        return result
+    ctypes.util.find_library = _patched_find_library
 
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, simpledialog
 import threading
 import time
 import json
@@ -24,10 +37,10 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 try:
-    import vlc
-    HAS_VLC = True
+    import mpv
+    HAS_MPV = True
 except (ImportError, OSError):
-    HAS_VLC = False
+    HAS_MPV = False
 
 from scanner import (
     generate_random_mac, check_mac, get_responding_endpoint, parse_url,
@@ -47,6 +60,7 @@ BG_INPUT = "#12122a"
 BG_BAR = "#16162a"
 FG_DIM = "#888888"
 ACCENT = "#2563eb"
+MAX_PROXY_RETRIES = 15
 
 
 class App:
@@ -75,19 +89,15 @@ class App:
 
         # Player state
         self.player_token = None
-        self.player_channels = []      # all channels from current fetch
+        self.player_channels = []
         self.player_genres = []
         self.player_content_type = "itv"
-        self.vlc_instance = None
-        self.vlc_player = None
+        self.mpv_player = None
         self.current_tab = 0
+        self.current_stream_url = None
 
-        # Navigation stack (like reference app)
-        self.nav_stack = []  # [{level, data, genre_name}, ...]
-
-        # External player
-        self.external_player_command = ""
-        self._load_config()
+        # Navigation stack
+        self.nav_stack = []
 
         # Keep on top
         self.keep_on_top_var = tk.BooleanVar(value=False)
@@ -102,23 +112,12 @@ class App:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── Config (external player etc.) ──────────────────────
-    def _load_config(self):
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
-        if "ExternalPlayer" in config:
-            self.external_player_command = config["ExternalPlayer"].get(
-                "Command", "")
-
-    def _save_config(self):
-        config = configparser.ConfigParser()
-        config["ExternalPlayer"] = {
-            "Command": self.external_player_command}
+    # ── Timeout helper ─────────────────────────────────────
+    def _get_timeout(self):
         try:
-            with open(CONFIG_FILE, "w") as f:
-                config.write(f)
-        except Exception:
-            pass
+            return int(self.timeout_entry.get().strip())
+        except (ValueError, AttributeError):
+            return 5
 
     # ── Styles ─────────────────────────────────────────────
     def _setup_styles(self):
@@ -135,7 +134,6 @@ class App:
                         background="#2a2a4a", foreground="#ffffff",
                         font=("Menlo", 11, "bold"))
         style.map("Treeview", background=[("selected", ACCENT)])
-        # Progress bar style
         style.configure("green.Horizontal.TProgressbar",
                         troughcolor="#1e1e3a",
                         background="#00b359",
@@ -154,7 +152,7 @@ class App:
         self.left.pack(side=tk.LEFT, fill=tk.Y)
         self.left.pack_propagate(False)
 
-        # Two sidebar modes (placed on top of each other)
+        # Two sidebar modes
         self.sidebar_scanner = tk.Frame(self.left, bg=BG_SIDEBAR)
         self.sidebar_scanner.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.sidebar_player = tk.Frame(self.left, bg=BG_SIDEBAR)
@@ -246,8 +244,7 @@ class App:
                        fg="#aaaaaa", selectcolor=BG_INPUT,
                        activebackground=BG_SIDEBAR,
                        activeforeground="#cccccc",
-                       font=("Helvetica", 10)).pack(
-            side=tk.LEFT)
+                       font=("Helvetica", 10)).pack(side=tk.LEFT)
 
         tk.Checkbutton(cb_frame, text="Zawsze na wierzchu",
                        variable=self.keep_on_top_var, bg=BG_SIDEBAR,
@@ -258,15 +255,10 @@ class App:
                        command=self._toggle_keep_on_top).pack(
             side=tk.LEFT, padx=(6, 0))
 
-        # Buttons
-        btn_row = tk.Frame(left, bg=BG_SIDEBAR)
-        btn_row.pack(fill=tk.X, padx=16, pady=(2, 6))
-        self._make_btn(btn_row, "📁 Eksportuj", "#333355", "#444466",
+        # Export button
+        self._make_btn(left, "📁 Eksportuj wyniki", "#333355", "#444466",
                        self._export_results).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2), ipady=2)
-        self._make_btn(btn_row, "🎬 Odtwarzacz", "#333355", "#444466",
-                       self._choose_external_player).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0), ipady=2)
+            fill=tk.X, padx=16, pady=(2, 6), ipady=2)
 
         self._sep(left)
 
@@ -302,14 +294,13 @@ class App:
                                     bg=BG_SIDEBAR, fg="#666666")
         self.stat_status.pack(fill=tk.X, padx=18, pady=(4, 0))
 
-    # ── Sidebar: Player ───────────────────────────────────
+    # ── Sidebar: Player (only MACs + Profiles) ────────────
     def _build_sidebar_player(self, left):
         tk.Label(left, text="📺 PLAYER",
                  font=("Helvetica", 22, "bold"),
                  bg=BG_SIDEBAR, fg="#00d4ff").pack(pady=(14, 1))
         self._sep(left)
 
-        # Active profile label
         self.active_profile_label = tk.Label(
             left, text="Aktywny: (brak)", font=("Helvetica", 11, "bold"),
             bg=BG_SIDEBAR, fg="#ffaa00", anchor=tk.W, wraplength=240)
@@ -339,7 +330,7 @@ class App:
         sub_container = tk.Frame(left, bg=BG_SIDEBAR)
         sub_container.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 6))
 
-        # -- Sub-page 0: MAC list --
+        # -- Sub-page 0: MAC list (only MAC addresses, no URL) --
         sp0 = tk.Frame(sub_container, bg=BG_SIDEBAR)
         sp0.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.player_sub_pages.append(sp0)
@@ -406,7 +397,6 @@ class App:
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.tab_pages.append(page)
 
-        # Search bar at top
         search_frame = tk.Frame(page, bg=BG_DARK)
         search_frame.pack(fill=tk.X, padx=4, pady=(4, 2))
         tk.Label(search_frame, text="🔍", font=("Helvetica", 12),
@@ -420,7 +410,6 @@ class App:
             highlightbackground="#333355")
         self.mac_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
                                    padx=(0, 4), ipady=3)
-        self.mac_search_entry.insert(0, "")
         self.mac_search_var.trace_add("write", self._filter_active_macs)
 
         tf = tk.Frame(page, bg=BG_DARK)
@@ -515,18 +504,18 @@ class App:
                        self._remove_selected_proxy).pack(
             side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
 
-    # ── Page 3: Player ────────────────────────────────────
+    # ── Page 3: Player (embedded mpv + channel panel) ─────
     def _build_page_player(self, pages):
         page = tk.Frame(pages, bg=BG_DARK)
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.tab_pages.append(page)
 
-        # RIGHT channel panel (pack first for fixed width)
+        # RIGHT channel panel
         right_panel = tk.Frame(page, bg=BG_DARK, width=330)
         right_panel.pack(side=tk.RIGHT, fill=tk.Y)
         right_panel.pack_propagate(False)
 
-        # Content type buttons at top of right panel
+        # Content type buttons
         type_frame = tk.Frame(right_panel, bg=BG_DARK)
         type_frame.pack(fill=tk.X, padx=4, pady=(4, 2))
 
@@ -616,7 +605,7 @@ class App:
             bg=BG_DARK, fg=FG_DIM)
         self.channel_count_label.pack(pady=(2, 4))
 
-        # CENTER player + controls
+        # CENTER: embedded player + controls
         center = tk.Frame(page, bg="#000000")
         center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -624,12 +613,11 @@ class App:
         self.player_frame = tk.Frame(center, bg="#000000")
         self.player_frame.pack(fill=tk.BOTH, expand=True)
 
-        if HAS_VLC:
-            self._init_vlc()
-        else:
+        if not HAS_MPV:
             tk.Label(self.player_frame,
-                     text="Zainstaluj VLC aby odtwarzać tutaj\n"
-                          "Strumienie otworzą się w zewnętrznym odtwarzaczu",
+                     text="Zainstaluj mpv (brew install mpv)\n"
+                          "oraz pip install python-mpv\n"
+                          "aby korzystać z wbudowanego odtwarzacza",
                      font=("Helvetica", 14), bg="#000000", fg="#555577",
                      justify=tk.CENTER).place(relx=0.5, rely=0.5,
                                               anchor=tk.CENTER)
@@ -676,7 +664,7 @@ class App:
         self.player_status_label.pack(side=tk.LEFT, padx=(12, 0),
                                       fill=tk.X, expand=True)
 
-    # ── Page 4: Profiles ──────────────────────────────────
+    # ── Page 4: Profiles (with naming + rename) ───────────
     def _build_page_profiles(self, pages):
         page = tk.Frame(pages, bg=BG_DARK)
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -730,6 +718,9 @@ class App:
         bot.pack(fill=tk.X, padx=10, pady=(0, 10))
         self._make_btn(bot, "✅ Ustaw aktywny", ACCENT, "#1d4ed8",
                        self._set_active_profile).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._make_btn(bot, "✏️ Zmień nazwę", "#c78d00", "#a87600",
+                       self._rename_profile).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(bot, "🗑 Usuń profil", "#cc3333", "#aa2222",
                        self._delete_profile).pack(
@@ -824,8 +815,7 @@ class App:
             else:
                 btn._normal_bg = "#333355"
                 btn.configure(bg="#333355")
-        # Sidebar
-        if idx == 3:  # Player
+        if idx == 3:
             self.sidebar_player.lift()
             self._refresh_player_mac_list()
             self._refresh_player_profile_list()
@@ -863,48 +853,6 @@ class App:
         self.root.attributes("-topmost", self.keep_on_top_var.get())
 
     # ══════════════════════════════════════════════════════
-    #  EXTERNAL PLAYER CHOOSER
-    # ══════════════════════════════════════════════════════
-
-    def _choose_external_player(self):
-        if platform.system() == "Darwin":
-            filetypes = [("Aplikacje", "*.app"), ("Wszystkie", "*.*")]
-            initial_dir = "/Applications"
-        elif platform.system() == "Windows":
-            filetypes = [("Pliki exe", "*.exe *.bat"),
-                         ("Wszystkie", "*.*")]
-            initial_dir = "C:\\"
-        else:
-            filetypes = [("Wszystkie", "*.*")]
-            initial_dir = os.path.expanduser("~")
-
-        path = filedialog.askopenfilename(
-            title="Wybierz zewnętrzny odtwarzacz",
-            filetypes=filetypes, initialdir=initial_dir)
-        if not path:
-            return
-
-        # macOS .app bundle — extract actual executable
-        if platform.system() == "Darwin" and path.endswith(".app"):
-            app_name = os.path.basename(path).replace(".app", "")
-            exe_path = os.path.join(path, "Contents", "MacOS", app_name)
-            if os.path.exists(exe_path):
-                self.external_player_command = exe_path
-            else:
-                # Try VLC specifically
-                vlc_exe = os.path.join(path, "Contents", "MacOS", "VLC")
-                if os.path.exists(vlc_exe):
-                    self.external_player_command = vlc_exe
-                else:
-                    self._log(f"Nie znaleziono exe w {path}", "error")
-                    return
-        else:
-            self.external_player_command = path
-
-        self._save_config()
-        self._log(f"Odtwarzacz: {self.external_player_command}", "success")
-
-    # ══════════════════════════════════════════════════════
     #  LOGGING
     # ══════════════════════════════════════════════════════
 
@@ -939,11 +887,10 @@ class App:
             text=f"Status: {text}", fg=color))
 
     # ══════════════════════════════════════════════════════
-    #  ACTIVE MAC MANAGEMENT (with search/filter)
+    #  ACTIVE MAC MANAGEMENT
     # ══════════════════════════════════════════════════════
 
     def _filter_active_macs(self, *args):
-        """Filter the active MACs treeview by search text."""
         query = self.mac_search_var.get().strip().lower()
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1003,13 +950,20 @@ class App:
         self._log(f"🧬 Sklonowano MAC: {mac}", "success")
 
     def _save_selected_as_profile(self):
+        """Save selected MAC as profile — ask for name via dialog."""
         sel = self.tree.selection()
         if not sel:
             self._log("Zaznacz MAC do zapisania jako profil.", "warning")
             return
         vals = self.tree.item(sel[0], "values")
         url, mac, expiry, proxy = vals[0], vals[1], vals[2], vals[3]
-        name = f"Profil {len(self.profiles) + 1}"
+
+        name = simpledialog.askstring(
+            "Nazwa profilu", "Podaj nazwę dla profilu:",
+            initialvalue=f"Profil {len(self.profiles) + 1}",
+            parent=self.root)
+        if not name:
+            return
         self.profiles.append({"name": name, "mac": mac, "url": url,
                               "proxy": proxy})
         self._refresh_profile_tree()
@@ -1228,6 +1182,53 @@ class App:
             self._log_safe(f"Zmiana proxy → {new_proxy}", "info")
 
     # ══════════════════════════════════════════════════════
+    #  PROXY RETRY HELPER — try all proxies before giving up
+    # ══════════════════════════════════════════════════════
+
+    def _find_endpoint_with_proxy_retry(self, server_address, timeout):
+        """Try to find a responding endpoint, cycling through all proxies.
+        Returns (endpoint, proxy_used) or (None, None).
+        """
+        proxy = self._get_active_proxy()
+        endpoint, ep_code = get_responding_endpoint(
+            server_address, timeout=timeout, proxy=proxy)
+
+        if endpoint:
+            return endpoint, proxy
+
+        # First proxy failed — iterate through all available proxies
+        tried = {proxy} if proxy else set()
+        for attempt in range(MAX_PROXY_RETRIES):
+            if proxy:
+                self._handle_proxy_fail(proxy, ep_code)
+            proxy = self._get_active_proxy()
+
+            if not proxy or proxy in tried:
+                # Try rotating to get a fresh one
+                proxy = rotate_proxy()
+            if not proxy or proxy in tried:
+                break
+
+            tried.add(proxy)
+            self._log_safe(
+                f"Próba {attempt + 2} z proxy: {proxy}", "info")
+            endpoint, ep_code = get_responding_endpoint(
+                server_address, timeout=timeout, proxy=proxy)
+            if endpoint:
+                return endpoint, proxy
+
+        # Last resort: try without proxy
+        self._log_safe("Próba bez proxy...", "warning")
+        endpoint, ep_code = get_responding_endpoint(
+            server_address, timeout=timeout, proxy=None)
+        if endpoint:
+            return endpoint, None
+
+        self._log_safe(
+            f"Serwer nie odpowiada (HTTP {ep_code})!", "error")
+        return None, None
+
+    # ══════════════════════════════════════════════════════
     #  PROFILES
     # ══════════════════════════════════════════════════════
 
@@ -1269,6 +1270,30 @@ class App:
             self._log(f"Aktywny profil: {self.active_profile['name']}",
                       "info")
 
+    def _rename_profile(self):
+        """Rename selected profile via dialog."""
+        sel = self.profile_tree.selection()
+        if not sel:
+            self._log("Zaznacz profil do zmiany nazwy.", "warning")
+            return
+        idx = self.profile_tree.index(sel[0])
+        if idx >= len(self.profiles):
+            return
+        old_name = self.profiles[idx]["name"]
+        new_name = simpledialog.askstring(
+            "Zmień nazwę", "Nowa nazwa profilu:",
+            initialvalue=old_name, parent=self.root)
+        if not new_name or new_name == old_name:
+            return
+        self.profiles[idx]["name"] = new_name
+        if (self.active_profile and
+                self.active_profile.get("mac") == self.profiles[idx]["mac"]):
+            self.active_profile["name"] = new_name
+            self.active_profile_label.configure(
+                text=f"Aktywny: {new_name}")
+        self._refresh_profile_tree()
+        self._log(f"Zmieniono nazwę: {old_name} → {new_name}", "info")
+
     def _delete_profile(self):
         sel = self.profile_tree.selection()
         if not sel:
@@ -1287,19 +1312,18 @@ class App:
             self._log(f"Usunięto profil: {removed['name']}", "info")
 
     # ══════════════════════════════════════════════════════
-    #  PLAYER SIDEBAR HELPERS
+    #  PLAYER SIDEBAR HELPERS (only MAC, no URL)
     # ══════════════════════════════════════════════════════
 
     def _refresh_player_mac_list(self):
         self.player_mac_listbox.delete(0, tk.END)
         for m in self.active_macs:
-            text = f"{m['mac']}  [{m['url'][:30]}]"
-            self.player_mac_listbox.insert(tk.END, text)
+            self.player_mac_listbox.insert(tk.END, m["mac"])
 
     def _refresh_player_profile_list(self):
         self.player_profile_listbox.delete(0, tk.END)
         for p in self.profiles:
-            text = f"{p['name']}  ({p['mac']})"
+            text = f"{p['name']}  ({p['mac'][:17]})"
             self.player_profile_listbox.insert(tk.END, text)
 
     def _on_player_mac_select(self, event):
@@ -1360,11 +1384,10 @@ class App:
         self._fetch_channels_for_genre()
 
     # ══════════════════════════════════════════════════════
-    #  NAVIGATION STACK (like reference IPTV player)
+    #  NAVIGATION STACK
     # ══════════════════════════════════════════════════════
 
     def _update_nav_ui(self):
-        """Update Go Back button and nav label based on stack."""
         if self.nav_stack:
             self._btn_enable(self.go_back_btn)
             trail = " → ".join(s.get("label", "?") for s in self.nav_stack)
@@ -1374,7 +1397,6 @@ class App:
             self.nav_label.configure(text="")
 
     def _nav_go_back(self):
-        """Pop navigation stack and restore previous channel list."""
         if not self.nav_stack:
             return
         self.nav_stack.pop()
@@ -1383,15 +1405,10 @@ class App:
             self.player_channels = prev.get("channels", [])
             self.root.after(0, self._populate_channel_tree)
         else:
-            # Back to top-level genres
             self._fetch_channels()
         self._update_nav_ui()
 
     def _on_channel_double_click(self, event):
-        """Handle double-click on channel list.
-        If item has 'cmd' -> play it.
-        If item is a genre/category -> navigate into it.
-        """
         sel = self.channel_tree.selection()
         if not sel:
             return
@@ -1401,32 +1418,26 @@ class App:
 
         ch = self.player_channels[idx]
 
-        # If it has a cmd/stream, play it
         if ch.get("cmd"):
             self._play_channel_entry(ch)
             return
 
-        # If it looks like a genre/category entry (has id, title but no cmd),
-        # drill down into it
         genre_id = ch.get("id")
         genre_name = ch.get("name", ch.get("title", "?"))
         if genre_id:
-            # Save current list on stack
             self.nav_stack.append({
                 "label": genre_name,
                 "channels": list(self.player_channels),
                 "genre_id": str(genre_id),
             })
             self._update_nav_ui()
-            # Fetch channels for this genre
             self._fetch_genre_channels(str(genre_id))
 
     # ══════════════════════════════════════════════════════
-    #  CHANNEL SEARCH / FILTER
+    #  CHANNEL SEARCH / FILTER / SORT
     # ══════════════════════════════════════════════════════
 
     def _filter_channel_list(self, *args):
-        """Filter channel tree by search text."""
         query = self.channel_search_var.get().strip().lower()
         for item in self.channel_tree.get_children():
             self.channel_tree.delete(item)
@@ -1442,14 +1453,13 @@ class App:
         self.channel_count_label.configure(text=f"Kanały: {count}")
 
     def _sort_channel_list(self):
-        """Sort channels alphabetically by name."""
         self.player_channels.sort(
             key=lambda c: c.get("name", c.get("o_name", "")).lower())
         self._populate_channel_tree()
         self._log("Posortowano kanały A→Z.", "info")
 
     # ══════════════════════════════════════════════════════
-    #  CHANNEL FETCHING
+    #  CHANNEL FETCHING — uses URL directly (no endpoint scan)
     # ══════════════════════════════════════════════════════
 
     def _fetch_channels(self):
@@ -1473,25 +1483,16 @@ class App:
                          daemon=True).start()
 
     def _fetch_channels_worker(self, url_raw, mac, proxy):
-        server = parse_url(url_raw)
-        self._set_progress(20, "Szukam endpoint-u...")
-        endpoint, ep_code = get_responding_endpoint(
-            server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._log_safe(f"Serwer nie odpowiada (HTTP {ep_code}).", "error")
-            if proxy and ep_code and should_remove_proxy(ep_code):
-                self._handle_proxy_fail(proxy, ep_code)
-            self._set_progress(100, "Błąd połączenia")
-            self.root.after(0, lambda: self.player_status_label.configure(
-                text="Błąd połączenia"))
-            return
+        timeout = self._get_timeout()
+        url = parse_url(url_raw)
 
-        url = server + endpoint
-        self._set_progress(35, "Handshake...")
-        token, hs_code = get_handshake(url, mac, timeout=5, proxy=proxy)
+        self._set_progress(30, "Handshake...")
+        token, hs_code = get_handshake(url, mac, timeout=timeout, proxy=proxy)
         if not token:
             self._log_safe(f"Handshake failed (HTTP {hs_code}).", "error")
             self._set_progress(100, "Błąd handshake")
+            self.root.after(0, lambda: self.player_status_label.configure(
+                text="Błąd połączenia"))
             return
         self.player_token = token
 
@@ -1499,7 +1500,7 @@ class App:
         self._set_progress(50, "Pobieranie kategorii...")
         genres = get_genres(url, mac, token,
                             content_type=self.player_content_type,
-                            timeout=5, proxy=proxy)
+                            timeout=timeout, proxy=proxy)
         self.player_genres = genres
         self.root.after(0, self._populate_genre_menu)
 
@@ -1510,7 +1511,7 @@ class App:
         while True:
             items = get_channels(url, mac, token, genre_id="*",
                                  content_type=self.player_content_type,
-                                 page=page, timeout=5, proxy=proxy)
+                                 page=page, timeout=timeout, proxy=proxy)
             if not items:
                 break
             all_items.extend(items)
@@ -1531,11 +1532,10 @@ class App:
         self.root.after(0, lambda: self.player_status_label.configure(
             text=f"{len(all_items)} kanałów"))
 
-        # Also fetch account info in the background
+        # Also fetch account info
         self._fetch_account_info_worker(url, mac, token, proxy)
 
     def _fetch_genre_channels(self, genre_id):
-        """Fetch channels for a specific genre (used by nav stack)."""
         mac, url_raw, proxy = self._get_player_mac_url_proxy()
         if not mac or not self.player_token:
             return
@@ -1543,7 +1543,7 @@ class App:
             url_raw = self.url_entry.get().strip()
         if not url_raw:
             return
-        self._set_progress(30, f"Pobieranie kategorii...")
+        self._set_progress(30, "Pobieranie kategorii...")
         threading.Thread(
             target=self._fetch_genre_worker,
             args=(url_raw, mac, proxy, genre_id), daemon=True).start()
@@ -1562,7 +1562,6 @@ class App:
                 if name == genre_name:
                     genre_id = str(g.get("id", "*"))
                     break
-
         if not url_raw:
             url_raw = self.url_entry.get().strip()
         if not url_raw:
@@ -1572,19 +1571,15 @@ class App:
             args=(url_raw, mac, proxy, genre_id), daemon=True).start()
 
     def _fetch_genre_worker(self, url_raw, mac, proxy, genre_id):
-        server = parse_url(url_raw)
-        endpoint, _ = get_responding_endpoint(server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._set_progress(100, "Brak połączenia")
-            return
-        url = server + endpoint
+        timeout = self._get_timeout()
+        url = parse_url(url_raw)
         items = []
         page = 1
         while True:
             batch = get_channels(url, mac, self.player_token,
                                  genre_id=genre_id,
                                  content_type=self.player_content_type,
-                                 page=page, timeout=5, proxy=proxy)
+                                 page=page, timeout=timeout, proxy=proxy)
             if not batch:
                 break
             items.extend(batch)
@@ -1643,14 +1638,9 @@ class App:
                          daemon=True).start()
 
     def _fetch_account_info_thread(self, url_raw, mac, proxy):
-        server = parse_url(url_raw)
-        endpoint, _ = get_responding_endpoint(server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._log_safe("Serwer nie odpowiada.", "error")
-            self._set_progress(100, "Błąd")
-            return
-        url = server + endpoint
-        token, _ = get_handshake(url, mac, timeout=5, proxy=proxy)
+        timeout = self._get_timeout()
+        url = parse_url(url_raw)
+        token, _ = get_handshake(url, mac, timeout=timeout, proxy=proxy)
         if not token:
             self._log_safe("Handshake failed.", "error")
             self._set_progress(100, "Błąd")
@@ -1658,8 +1648,8 @@ class App:
         self._fetch_account_info_worker(url, mac, token, proxy)
 
     def _fetch_account_info_worker(self, url, mac, token, proxy):
-        """Fetch account_info from portal and display in Info tab."""
         try:
+            timeout = self._get_timeout()
             cookies = make_cookies(mac)
             params = make_params(mac, "get_main_info", "account_info")
             headers = {
@@ -1668,7 +1658,7 @@ class App:
                 "Authorization": f"Bearer {token}",
             }
             res = _request_get(url, params=params, headers=headers,
-                               cookies=cookies, timeout=5, proxy=proxy)
+                               cookies=cookies, timeout=timeout, proxy=proxy)
             if res.status_code != 200:
                 self._log_safe(f"Account info HTTP {res.status_code}",
                                "error")
@@ -1678,12 +1668,12 @@ class App:
             if not js:
                 return
 
-            # Also try get_profile
             profile = {}
             try:
                 params2 = make_params(mac, "get_profile", "stb")
                 res2 = _request_get(url, params=params2, headers=headers,
-                                    cookies=cookies, timeout=5, proxy=proxy)
+                                    cookies=cookies, timeout=timeout,
+                                    proxy=proxy)
                 if res2.status_code == 200:
                     profile = res2.json().get("js", {})
             except Exception:
@@ -1694,7 +1684,6 @@ class App:
             info_lines.append(("MAC:", mac))
             info_lines.append(("─" * 40, ""))
 
-            # Account info fields
             phone = js.get("phone", "?")
             info_lines.append(("Wygasa:", phone))
 
@@ -1708,7 +1697,6 @@ class App:
                 if val:
                     info_lines.append((f"{label}:", str(val)))
 
-            # Profile fields
             if profile:
                 info_lines.append(("─" * 40, ""))
                 for key, label in [
@@ -1743,53 +1731,66 @@ class App:
         self.info_text.configure(state=tk.DISABLED)
 
     # ══════════════════════════════════════════════════════
-    #  VLC PLAYER
+    #  MPV EMBEDDED PLAYER
     # ══════════════════════════════════════════════════════
 
-    def _init_vlc(self):
+    def _init_mpv(self):
+        """Initialize mpv player embedded in the player_frame."""
+        if not HAS_MPV:
+            return
         try:
-            self.vlc_instance = vlc.Instance("--no-xlib")
-            self.vlc_player = self.vlc_instance.media_player_new()
-        except Exception:
-            pass
+            wid = str(int(self.player_frame.winfo_id()))
+            self.mpv_player = mpv.MPV(
+                wid=wid,
+                vo="libmpv" if sys.platform == "darwin" else "x11",
+                input_default_bindings=True,
+                input_vo_keyboard=True,
+                osc=True,
+            )
+            self.mpv_player.volume = self.volume_scale.get()
+        except Exception as e:
+            self._log(f"Błąd inicjalizacji mpv: {e}", "error")
+            self.mpv_player = None
 
-    def _vlc_play_url(self, stream_url):
-        if not HAS_VLC or not self.vlc_player:
+    def _ensure_mpv(self):
+        """Lazy-init mpv when first needed (needs visible window)."""
+        if not HAS_MPV:
+            return False
+        if self.mpv_player is None:
+            self._init_mpv()
+        return self.mpv_player is not None
+
+    def _mpv_play_url(self, stream_url):
+        if not self._ensure_mpv():
             return False
         try:
-            media = self.vlc_instance.media_new(stream_url)
-            self.vlc_player.set_media(media)
-            if sys.platform == "darwin":
-                self.vlc_player.set_nsobject(
-                    self.player_frame.winfo_id())
-            elif sys.platform == "win32":
-                self.vlc_player.set_hwnd(
-                    self.player_frame.winfo_id())
-            else:
-                self.vlc_player.set_xwindow(
-                    self.player_frame.winfo_id())
-            self.vlc_player.play()
-            self.vlc_player.audio_set_volume(self.volume_scale.get())
+            self.mpv_player.play(stream_url)
             return True
-        except Exception:
+        except Exception as e:
+            self._log_safe(f"mpv error: {e}", "error")
             return False
 
     def _player_play_pause(self):
-        if HAS_VLC and self.vlc_player:
-            if self.vlc_player.is_playing():
-                self.vlc_player.pause()
-                self.play_pause_btn.configure(text="▶")
-            else:
-                self.vlc_player.play()
-                self.play_pause_btn.configure(text="⏸")
+        if self.mpv_player:
+            try:
+                paused = self.mpv_player.pause
+                self.mpv_player.pause = not paused
+                self.play_pause_btn.configure(
+                    text="▶" if not paused else "⏸")
+            except Exception:
+                self._play_selected_channel()
         else:
             self._play_selected_channel()
 
     def _player_stop(self):
-        if HAS_VLC and self.vlc_player:
-            self.vlc_player.stop()
-            self.play_pause_btn.configure(text="▶")
-            self.player_status_label.configure(text="Zatrzymano")
+        if self.mpv_player:
+            try:
+                self.mpv_player.stop()
+            except Exception:
+                pass
+        self.play_pause_btn.configure(text="▶")
+        self.player_status_label.configure(text="Zatrzymano")
+        self.current_stream_url = None
 
     def _player_prev(self):
         sel = self.channel_tree.selection()
@@ -1818,21 +1819,18 @@ class App:
             self._play_selected_channel()
 
     def _on_volume_change(self, val):
-        if HAS_VLC and self.vlc_player:
+        if self.mpv_player:
             try:
-                self.vlc_player.audio_set_volume(int(float(val)))
+                self.mpv_player.volume = int(float(val))
             except Exception:
                 pass
 
     def _player_fullscreen(self):
-        if HAS_VLC and self.vlc_player:
-            self.vlc_player.toggle_fullscreen()
-        else:
-            is_fs = self.root.attributes("-fullscreen")
-            self.root.attributes("-fullscreen", not is_fs)
+        is_fs = self.root.attributes("-fullscreen")
+        self.root.attributes("-fullscreen", not is_fs)
 
     # ══════════════════════════════════════════════════════
-    #  PLAY / STREAM
+    #  PLAY / STREAM — uses URL directly
     # ══════════════════════════════════════════════════════
 
     def _play_selected_channel(self):
@@ -1847,7 +1845,6 @@ class App:
         self._play_channel_entry(ch)
 
     def _play_channel_entry(self, ch):
-        """Play a channel dict entry."""
         cmd = ch.get("cmd", "")
         name = ch.get("name", ch.get("o_name", "?"))
         if not cmd:
@@ -1868,18 +1865,12 @@ class App:
             self._log_safe("Brak MAC/URL. Wybierz profil.", "error")
             return
 
-        server = parse_url(url_raw)
-        endpoint, ep_code = get_responding_endpoint(
-            server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._log_safe(f"Serwer nie odpowiada (HTTP {ep_code}).", "error")
-            self._set_progress(100, "Błąd")
-            return
-        url = server + endpoint
+        timeout = self._get_timeout()
+        url = parse_url(url_raw)
 
         if not self.player_token:
             self.player_token, _ = get_handshake(
-                url, mac, timeout=5, proxy=proxy)
+                url, mac, timeout=timeout, proxy=proxy)
         if not self.player_token:
             self._log_safe("Nie udało się uzyskać tokena.", "error")
             self._set_progress(100, "Błąd")
@@ -1888,7 +1879,7 @@ class App:
         stream_url = get_stream_url(
             url, mac, self.player_token, cmd,
             content_type=self.player_content_type,
-            timeout=5, proxy=proxy)
+            timeout=timeout, proxy=proxy)
         if not stream_url:
             self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
             self._set_progress(100, "Błąd")
@@ -1896,46 +1887,15 @@ class App:
 
         self._log_safe(f"Stream: {stream_url}", "success")
         self._set_progress(100, f"▶ {name}")
+        self.current_stream_url = stream_url
 
-        # Try VLC first
-        if HAS_VLC and self.vlc_player:
-            ok = self._vlc_play_url(stream_url)
-            if ok:
-                self._log_safe("Odtwarzanie w wbudowanym VLC.", "success")
-                return
-
-        # Use configured external player, or fallback
-        self._open_in_external_player(stream_url, name)
-
-    def _open_in_external_player(self, stream_url, name=""):
-        """Open stream in external player."""
-        try:
-            if self.external_player_command and \
-                    os.path.exists(self.external_player_command):
-                ua_arg = (":http-user-agent=AppleCoreMedia/1.0.0.20L563 "
-                          "(Apple TV; U; CPU OS 16_5 like Mac OS X; en_us)")
-                subprocess.Popen([self.external_player_command,
-                                  stream_url, ua_arg])
-                self._log_safe(
-                    f"Otworzono w: {os.path.basename(self.external_player_command)}",
-                    "success")
-                return
-
-            # Fallback: system default
-            if platform.system() == "Darwin":
-                vlc_path = "/Applications/VLC.app/Contents/MacOS/VLC"
-                if os.path.exists(vlc_path):
-                    subprocess.Popen([vlc_path, stream_url])
-                else:
-                    subprocess.Popen(["open", stream_url])
-            elif platform.system() == "Windows":
-                os.startfile(stream_url)
-            else:
-                subprocess.Popen(["xdg-open", stream_url])
-            self._log_safe("Otworzono w zewnętrznym odtwarzaczu.", "success")
-        except Exception as e:
-            self._log_safe(f"Błąd odtwarzacza: {e}", "error")
-            self._log_safe(f"URL: {stream_url}", "info")
+        # Play in embedded mpv
+        ok = self._mpv_play_url(stream_url)
+        if ok:
+            self._log_safe("Odtwarzanie w wbudowanym mpv.", "success")
+        else:
+            self._log_safe("mpv niedostępny. Zainstaluj: brew install mpv",
+                           "error")
 
     def _copy_channel_url(self):
         sel = self.channel_tree.selection()
@@ -1960,22 +1920,17 @@ class App:
         if not mac or not url_raw:
             self._log_safe("Brak MAC/URL.", "error")
             return
-        server = parse_url(url_raw)
-        endpoint, _ = get_responding_endpoint(
-            server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._log_safe("Serwer nie odpowiada.", "error")
-            return
-        url = server + endpoint
+        timeout = self._get_timeout()
+        url = parse_url(url_raw)
         if not self.player_token:
             self.player_token, _ = get_handshake(
-                url, mac, timeout=5, proxy=proxy)
+                url, mac, timeout=timeout, proxy=proxy)
         if not self.player_token:
             return
         stream_url = get_stream_url(
             url, mac, self.player_token, cmd,
             content_type=self.player_content_type,
-            timeout=5, proxy=proxy)
+            timeout=timeout, proxy=proxy)
         if not stream_url:
             self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
             return
@@ -1987,7 +1942,7 @@ class App:
         self._log(f"Skopiowano URL: {name} → {url}", "success")
 
     # ══════════════════════════════════════════════════════
-    #  SCANNING
+    #  SCANNING (with full proxy retry)
     # ══════════════════════════════════════════════════════
 
     def _toggle_start(self):
@@ -1999,7 +1954,7 @@ class App:
         url_raw = self.url_entry.get().strip()
         mac_prefix = self.mac_entry.get().strip()
         workers_str = self.workers_entry.get().strip()
-        timeout_str = self.timeout_entry.get().strip()
+        timeout = self._get_timeout()
 
         if not url_raw:
             self._log("Podaj adres URL serwera!", "error")
@@ -2012,10 +1967,6 @@ class App:
             workers = int(workers_str)
         except ValueError:
             workers = 10
-        try:
-            timeout = int(timeout_str)
-        except ValueError:
-            timeout = 5
 
         self.is_running = True
         self.is_paused = False
@@ -2043,33 +1994,23 @@ class App:
         self._set_status("Szukanie endpoint-u...", "#55aaff")
         self._set_progress(15, "Szukanie endpoint-u...")
 
-        proxy = self._get_active_proxy()
-        if proxy:
-            self._log_safe(f"Proxy: {proxy}", "info")
-
-        endpoint, ep_code = get_responding_endpoint(
-            server_address, timeout=timeout, proxy=proxy)
-        self._log_safe(f"Endpoint scan (HTTP {ep_code})", "dim")
+        # Use the full proxy retry helper
+        endpoint, proxy = self._find_endpoint_with_proxy_retry(
+            server_address, timeout)
 
         if self.stop_event.is_set():
             self._scan_finished()
             return
+
         if not endpoint:
-            if proxy and ep_code and should_remove_proxy(ep_code):
-                self._handle_proxy_fail(proxy, ep_code)
-                proxy = self._get_active_proxy()
-                if proxy:
-                    endpoint, ep_code = get_responding_endpoint(
-                        server_address, timeout=timeout, proxy=proxy)
-            if not endpoint:
-                self._log_safe(
-                    f"Serwer nie odpowiada (HTTP {ep_code})!", "error")
-                self._set_progress(100, "Serwer nie odpowiada")
-                self._scan_finished()
-                return
+            self._set_progress(100, "Serwer nie odpowiada")
+            self._scan_finished()
+            return
 
         url = server_address + endpoint
         self._log_safe(f"Endpoint: {url}", "success")
+        if proxy:
+            self._log_safe(f"Proxy: {proxy}", "info")
         self._set_status("Skanowanie...", "#00ff88")
         self._set_progress(30, "Skanowanie...")
 
@@ -2191,13 +2132,12 @@ class App:
     def _on_close(self):
         self.stop_event.set()
         self.pause_event.set()
-        if HAS_VLC and self.vlc_player:
+        if self.mpv_player:
             try:
-                self.vlc_player.stop()
+                self.mpv_player.terminate()
             except Exception:
                 pass
         self._save_session()
-        self._save_config()
         self._auto_save()
         self.root.destroy()
 

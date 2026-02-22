@@ -1,2 +1,2 @@
 requests>=2.31.0
-python-vlc>=3.0.0
+python-mpv>=1.0.0
