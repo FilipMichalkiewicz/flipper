@@ -13,21 +13,45 @@ set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-v3-20260222-git-250d605.7z"
 set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
 set "DESKTOP_DIR="
+set "PYTHON_EXE=python"
+set "PYTHON_ARGS="
+
+where python >nul 2>nul
+if errorlevel 1 (
+	where py >nul 2>nul
+ 	if not errorlevel 1 (
+		set "PYTHON_EXE=py"
+		set "PYTHON_ARGS=-3"
+	)
+)
+
+where %PYTHON_EXE% >nul 2>nul
+if errorlevel 1 (
+	echo ERROR: Python not found in PATH.
+	goto :fail
+)
 
 if not exist "%FLIPPER_DATA_DIR%" mkdir "%FLIPPER_DATA_DIR%"
 if not exist "%MPV_EXTRACT_DIR%" mkdir "%MPV_EXTRACT_DIR%"
 
 echo [1/6] Installing dependencies...
-python -m pip install --upgrade pip
-if errorlevel 1 goto :fail
-python -m pip install --upgrade pyinstaller python-mpv py7zr
-if errorlevel 1 goto :fail
+%PYTHON_EXE% %PYTHON_ARGS% -m pip install --upgrade pip
+if errorlevel 1 (
+	echo WARNING: pip upgrade failed, continuing...
+)
+%PYTHON_EXE% %PYTHON_ARGS% -m pip install --upgrade pyinstaller python-mpv py7zr
+if errorlevel 1 (
+	echo WARNING: dependency install failed, attempting build anyway...
+)
 
 echo [2/6] Ensuring libmpv-2.dll (download + extract if missing)...
 if not exist "%MPV_DLL%" (
 	echo libmpv-2.dll not found in %MPV_EXTRACT_DIR%. Downloading winbuild package...
 	powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 		"Invoke-WebRequest -Uri '%MPV_URL%' -OutFile '%MPV_ARCHIVE%'"
+	if errorlevel 1 (
+		echo WARNING: Download failed: %MPV_URL%
+	)
 
 	if exist "%MPV_ARCHIVE%" (
 		echo Extracting archive (fast path: tar/7z, fallback: py7zr)...
@@ -67,7 +91,7 @@ if not exist "%MPV_DLL%" (
 )
 
 REM Intentionally do not embed libmpv in --onefile to avoid using Temp\_MEI path.
-pyinstaller --name "Flipper" --windowed --onefile --clean main.py
+%PYTHON_EXE% %PYTHON_ARGS% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
 if errorlevel 1 goto :fail
 
 echo [6/6] Copying Flipper.exe to Desktop...
@@ -111,7 +135,7 @@ if not defined EXTRACTED_OK (
 )
 
 if not defined EXTRACTED_OK (
-	python -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1], mode='r'); z.extractall(path=sys.argv[2]); z.close()" "%ARCHIVE%" "%OUTDIR%"
+	%PYTHON_EXE% %PYTHON_ARGS% -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1], mode='r'); z.extractall(path=sys.argv[2]); z.close()" "%ARCHIVE%" "%OUTDIR%"
 	if not errorlevel 1 set "EXTRACTED_OK=1"
 )
 
