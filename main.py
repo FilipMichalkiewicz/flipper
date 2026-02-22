@@ -10,6 +10,11 @@ channel count filter, channel cache.
 import os
 import sys
 import platform
+import shutil
+import subprocess
+import ctypes
+from pathlib import Path
+from typing import Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog
@@ -18,6 +23,133 @@ import time
 import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+
+def _prepend_to_path(path: str):
+    if not path:
+        return
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    if path not in parts:
+        os.environ["PATH"] = path + os.pathsep + current
+
+
+def _is_mpv_dll_loadable() -> bool:
+    for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+        try:
+            ctypes.CDLL(dll_name)
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def _find_mpv_dll_dir() -> Optional[str]:
+    candidates = []
+
+    mpv_bin = shutil.which("mpv")
+    if mpv_bin:
+        candidates.append(os.path.dirname(mpv_bin))
+
+    local_mpv_dir = os.path.join(os.path.dirname(__file__), ".mpv")
+    candidates.append(local_mpv_dir)
+
+    path_env = os.environ.get("PATH", "")
+    if path_env:
+        candidates.extend(path_env.split(os.pathsep))
+
+    seen = set()
+    for directory in candidates:
+        if not directory or directory in seen:
+            continue
+        seen.add(directory)
+        for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+            if os.path.isfile(os.path.join(directory, dll_name)):
+                return directory
+    return None
+
+
+def _find_mpv_dll_under(root: str, max_depth: int = 5) -> Optional[str]:
+    root_path = Path(root)
+    if not root_path.exists():
+        return None
+
+    for current_root, dirs, files in os.walk(root):
+        rel = Path(current_root).relative_to(root_path)
+        if len(rel.parts) > max_depth:
+            dirs[:] = []
+            continue
+        if "libmpv-2.dll" in files or "libmpv.dll" in files:
+            return current_root
+    return None
+
+
+def _try_install_mpv_with_winget() -> bool:
+    winget = shutil.which("winget")
+    if not winget:
+        return False
+
+    candidate_ids = [
+        "shinchiro.mpv",
+        "MPV.MPV",
+        "mpv.mpv",
+    ]
+
+    for package_id in candidate_ids:
+        try:
+            proc = subprocess.run(
+                [
+                    winget,
+                    "install",
+                    "--id",
+                    package_id,
+                    "-e",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--silent",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+            )
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _ensure_mpv_runtime_windows():
+    if sys.platform != "win32":
+        return
+
+    if _is_mpv_dll_loadable():
+        return
+
+    dll_dir = _find_mpv_dll_dir()
+    if dll_dir:
+        _prepend_to_path(dll_dir)
+        if _is_mpv_dll_loadable():
+            return
+
+    installed = _try_install_mpv_with_winget()
+    if not installed:
+        return
+
+    search_roots = [
+        os.environ.get("LOCALAPPDATA", ""),
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
+    ]
+    for root in search_roots:
+        if not root:
+            continue
+        found = _find_mpv_dll_under(root)
+        if found:
+            _prepend_to_path(found)
+            break
+
+
+_ensure_mpv_runtime_windows()
 
 try:
     import mpv
@@ -631,10 +763,9 @@ class App:
 
         if not HAS_MPV:
             tk.Label(self.player_frame,
-                     text="Zainstaluj mpv:\n"
-                          "1) Pobierz z https://mpv.io/installation/\n"
-                          "2) Dodaj mpv do PATH\n"
-                          "3) pip install python-mpv",
+                     text="mpv niedostępny.\n"
+                         "Aplikacja próbuje instalacji automatycznej (winget).\n"
+                         "Jeśli nadal nie działa: zainstaluj mpv i python-mpv ręcznie.",
                      font=("Helvetica", 14), bg="#000000", fg="#555577",
                      justify=tk.CENTER).place(relx=0.5, rely=0.5,
                                               anchor=tk.CENTER)
@@ -2118,8 +2249,9 @@ class App:
         if ok:
             self._log_safe("Odtwarzanie w wbudowanym mpv.", "success")
         else:
-            self._log_safe("mpv niedostępny. Zainstaluj: brew install mpv",
-                           "error")
+            self._log_safe(
+                "mpv niedostępny. Sprawdź libmpv-2.dll i python-mpv (Windows).",
+                "error")
 
     def _copy_channel_url(self):
         sel = self.channel_tree.selection()
