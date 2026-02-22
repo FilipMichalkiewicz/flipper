@@ -36,6 +36,13 @@ wheels/
 session.json
 results.txt
 
+# MPV runtime artifacts
+libmpv-2.dll
+libmpv.dll
+libmpv.dll.a
+*.7z
+mpv_runtime/
+
 # IDE
 .vscode/
 .idea/

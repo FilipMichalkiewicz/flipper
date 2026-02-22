@@ -348,11 +348,71 @@ def count_channels_quick(url: str, mac: str, timeout: int = 5,
                            cookies=cookies, timeout=timeout, proxy=proxy)
         if res.status_code == 200:
             js = res.json().get("js", {})
-            total = js.get("total_items", 0)
+            data = js.get("data", []) if isinstance(js, dict) else []
+
+            total_raw = js.get("total_items", 0) if isinstance(js, dict) else 0
             try:
-                return int(total)
+                total = int(total_raw)
             except (ValueError, TypeError):
-                return len(js.get("data", []))
+                total = len(data)
+
+            # Some portals return absurd total_items values (e.g. 46000).
+            # If total looks suspiciously high, count real unique channels
+            # across pages with a hard cap.
+            if 0 <= total <= 5000:
+                return total if total > 0 else len(data)
+
+            unique_keys = set()
+
+            def _item_key(item: dict):
+                cmd = str(item.get("cmd", "")).strip()
+                if cmd:
+                    return ("cmd", cmd)
+                item_id = str(item.get("id", "")).strip()
+                if item_id:
+                    return ("id", item_id)
+                name = str(item.get("name", item.get("o_name", ""))).strip()
+                if name:
+                    return ("name", name)
+                return None
+
+            for row in data if isinstance(data, list) else []:
+                if isinstance(row, dict):
+                    key = _item_key(row)
+                    if key:
+                        unique_keys.add(key)
+
+            max_pages = 120
+            consecutive_no_growth = 0
+            for page in range(2, max_pages + 1):
+                params["p"] = str(page)
+                page_res = _request_get(url, params=params, headers=headers,
+                                        cookies=cookies, timeout=timeout,
+                                        proxy=proxy)
+                if page_res.status_code != 200:
+                    break
+
+                page_js = page_res.json().get("js", {})
+                page_data = page_js.get("data", []) if isinstance(page_js, dict) else []
+                if not isinstance(page_data, list) or not page_data:
+                    break
+
+                before = len(unique_keys)
+                for row in page_data:
+                    if isinstance(row, dict):
+                        key = _item_key(row)
+                        if key:
+                            unique_keys.add(key)
+
+                if len(unique_keys) == before:
+                    consecutive_no_growth += 1
+                else:
+                    consecutive_no_growth = 0
+
+                if len(page_data) < 10 or consecutive_no_growth >= 2:
+                    break
+
+            return len(unique_keys)
         return 0
     except Exception:
         return 0

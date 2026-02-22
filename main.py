@@ -16,6 +16,8 @@ import ctypes
 from pathlib import Path
 from typing import Optional
 
+_WIN_DLL_HANDLES = []
+
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog
 import threading
@@ -31,6 +33,19 @@ def _prepend_to_path(path: str):
     parts = current.split(os.pathsep) if current else []
     if path not in parts:
         os.environ["PATH"] = path + os.pathsep + current
+
+
+def _add_windows_dll_directory(path: str):
+    if sys.platform != "win32" or not path:
+        return
+    add_dir = getattr(os, "add_dll_directory", None)
+    if not add_dir:
+        return
+    try:
+        handle = add_dir(path)
+        _WIN_DLL_HANDLES.append(handle)
+    except Exception:
+        pass
 
 
 def _is_mpv_dll_loadable() -> bool:
@@ -127,6 +142,7 @@ def _ensure_mpv_runtime_windows():
 
     dll_dir = _find_mpv_dll_dir()
     if dll_dir:
+        _add_windows_dll_directory(dll_dir)
         _prepend_to_path(dll_dir)
         if _is_mpv_dll_loadable():
             return
@@ -145,6 +161,7 @@ def _ensure_mpv_runtime_windows():
             continue
         found = _find_mpv_dll_under(root)
         if found:
+            _add_windows_dll_directory(found)
             _prepend_to_path(found)
             break
 
@@ -221,6 +238,7 @@ class App:
         # Settings
         self.verbose_logs_var = tk.BooleanVar(value=False)
         self.use_proxy_var = tk.BooleanVar(value=True)
+        self.player_use_proxy_var = tk.BooleanVar(value=True)
         self.min_channels = 0
         self.save_folder = ""  # empty = current directory
 
@@ -513,9 +531,15 @@ class App:
         # Bottom buttons
         bot = tk.Frame(left, bg=BG_SIDEBAR)
         bot.pack(fill=tk.X, padx=10, pady=(0, 6))
-        self._make_btn(bot, "📡 Pobierz kanały", ACCENT, "#1d4ed8",
-                       self._fetch_channels).pack(
-            fill=tk.X, ipady=4, pady=(2, 2))
+        self._make_btn(bot, "🗑 Usuń MAC", "#cc3333", "#aa2222",
+                       self._delete_selected_player_mac).pack(
+            fill=tk.X, ipady=3, pady=(2, 2))
+        self._make_btn(bot, "✏️ Edytuj profil", "#c78d00", "#a87600",
+                       self._edit_selected_player_profile).pack(
+            fill=tk.X, ipady=3, pady=(0, 2))
+        self._make_btn(bot, "🗑 Usuń profil", "#cc3333", "#aa2222",
+                       self._delete_selected_player_profile).pack(
+            fill=tk.X, ipady=3, pady=(0, 2))
 
     # ── Page 0: Logs ──────────────────────────────────────
     def _build_page_logs(self, pages):
@@ -590,6 +614,9 @@ class App:
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(bot, "🧬 Klonuj MAC", "#6d28d9", "#5b21b6",
                        self._clone_selected_mac).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._make_btn(bot, "🗑 Usuń MAC", "#cc3333", "#aa2222",
+                       self._delete_selected_active_mac).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(bot, "💾 Zapisz profil", "#00b359", "#009945",
                        self._save_selected_as_profile).pack(
@@ -678,6 +705,21 @@ class App:
             btn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X,
                      ipady=2)
             self.content_type_btns.append((ctype, btn))
+
+        # Player proxy checkbox
+        proxy_player_frame = tk.Frame(right_panel, bg=BG_DARK)
+        proxy_player_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
+        tk.Checkbutton(
+            proxy_player_frame,
+            text="Używaj proxy w Playerze",
+            variable=self.player_use_proxy_var,
+            bg=BG_DARK,
+            fg="#aaaaaa",
+            selectcolor=BG_INPUT,
+            activebackground=BG_DARK,
+            activeforeground="#cccccc",
+            font=("Helvetica", 10),
+        ).pack(anchor=tk.W)
 
         # Genre dropdown
         genre_frame = tk.Frame(right_panel, bg=BG_DARK)
@@ -869,6 +911,9 @@ class App:
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(bot, "✏️ Zmień nazwę", "#c78d00", "#a87600",
                        self._rename_profile).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._make_btn(bot, "✏️ Edytuj profil", "#c78d00", "#a87600",
+                       self._edit_profile).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(bot, "🗑 Usuń profil", "#cc3333", "#aa2222",
                        self._delete_profile).pack(
@@ -1229,6 +1274,33 @@ class App:
         self.root.clipboard_append(text)
         self._log(f"Skopiowano {len(self.active_macs)} MAC.", "info")
 
+    def _delete_selected_active_mac(self):
+        sel = self.tree.selection()
+        if not sel:
+            self._log("Zaznacz MAC do usunięcia.", "warning")
+            return
+        vals = self.tree.item(sel[0], "values")
+        if len(vals) < 2:
+            return
+        url = vals[0]
+        mac = vals[1]
+
+        before = len(self.active_macs)
+        self.active_macs = [m for m in self.active_macs
+                            if not (m.get("mac") == mac and
+                                    m.get("url") == url)]
+        after = len(self.active_macs)
+        if after == before:
+            self._log("Nie znaleziono rekordu do usunięcia.", "warning")
+            return
+
+        self.mac_proxy_map.pop(mac, None)
+        self.tree.delete(sel[0])
+        self.mac_count_label.configure(text=f"Znaleziono: {after}")
+        self._refresh_player_mac_list()
+        self._auto_save()
+        self._log(f"Usunięto MAC: {mac}", "info")
+
     def _clone_selected_mac(self):
         sel = self.tree.selection()
         if not sel:
@@ -1322,6 +1394,7 @@ class App:
             "verbose_logs": self.verbose_logs_var.get(),
             "save_folder": self.save_folder,
             "use_proxy": self.use_proxy_var.get(),
+            "player_use_proxy": self.player_use_proxy_var.get(),
             "min_channels": self.min_channels_entry.get(),
         }
         try:
@@ -1392,6 +1465,8 @@ class App:
             self.verbose_logs_var.set(data["verbose_logs"])
         if "use_proxy" in data:
             self.use_proxy_var.set(data["use_proxy"])
+        if "player_use_proxy" in data:
+            self.player_use_proxy_var.set(data["player_use_proxy"])
         if "min_channels" in data:
             self.min_channels_entry.delete(0, tk.END)
             self.min_channels_entry.insert(0, data["min_channels"])
@@ -1586,6 +1661,58 @@ class App:
             self._log(f"Aktywny profil: {self.active_profile['name']}",
                       "info")
 
+    def _edit_profile(self):
+        sel = self.profile_tree.selection()
+        if not sel:
+            self._log("Zaznacz profil do edycji.", "warning")
+            return
+        idx = self.profile_tree.index(sel[0])
+        if idx >= len(self.profiles):
+            return
+
+        profile = self.profiles[idx]
+        old_name = profile.get("name", "")
+
+        name = simpledialog.askstring(
+            "Edytuj profil", "Nazwa:",
+            initialvalue=profile.get("name", ""), parent=self.root)
+        if name is None:
+            return
+
+        mac = simpledialog.askstring(
+            "Edytuj profil", "MAC:",
+            initialvalue=profile.get("mac", ""), parent=self.root)
+        if mac is None:
+            return
+
+        url = simpledialog.askstring(
+            "Edytuj profil", "URL:",
+            initialvalue=profile.get("url", ""), parent=self.root)
+        if url is None:
+            return
+
+        proxy = simpledialog.askstring(
+            "Edytuj profil", "Proxy (puste = brak):",
+            initialvalue=profile.get("proxy", ""), parent=self.root)
+        if proxy is None:
+            return
+
+        profile["name"] = name.strip() or old_name
+        profile["mac"] = mac.strip()
+        profile["url"] = url.strip()
+        profile["proxy"] = proxy.strip()
+
+        if (self.active_profile and
+                self.active_profile.get("name") == old_name and
+                self.active_profile.get("mac") == self.profiles[idx].get("mac")):
+            self.active_profile = profile
+            self.active_profile_label.configure(
+                text=f"Aktywny: {profile['name']}")
+
+        self._refresh_profile_tree()
+        self._refresh_player_profile_list()
+        self._log(f"Zaktualizowano profil: {profile['name']}", "success")
+
     def _rename_profile(self):
         """Rename selected profile via dialog."""
         sel = self.profile_tree.selection()
@@ -1625,6 +1752,7 @@ class App:
                 self.active_profile_label.configure(
                     text="Aktywny: (brak)")
             self._refresh_profile_tree()
+            self._refresh_player_profile_list()
             self._log(f"Usunięto profil: {removed['name']}", "info")
 
     # ══════════════════════════════════════════════════════
@@ -1641,6 +1769,51 @@ class App:
         for p in self.profiles:
             text = f"{p['name']}  ({p['mac'][:17]})"
             self.player_profile_listbox.insert(tk.END, text)
+
+    def _delete_selected_player_mac(self):
+        sel = self.player_mac_listbox.curselection()
+        if not sel:
+            self._log("Zaznacz MAC w panelu Player.", "warning")
+            return
+        idx = sel[0]
+        if idx >= len(self.active_macs):
+            return
+        removed = self.active_macs.pop(idx)
+        self.mac_proxy_map.pop(removed.get("mac", ""), None)
+        self._filter_active_macs()
+        self._refresh_player_mac_list()
+        self.mac_count_label.configure(text=f"Znaleziono: {len(self.active_macs)}")
+        self._auto_save()
+        self._log(f"Usunięto MAC: {removed.get('mac', '?')}", "info")
+
+    def _delete_selected_player_profile(self):
+        sel = self.player_profile_listbox.curselection()
+        if not sel:
+            self._log("Zaznacz profil w panelu Player.", "warning")
+            return
+        idx = sel[0]
+        if idx >= len(self.profiles):
+            return
+        removed = self.profiles.pop(idx)
+        if (self.active_profile and
+                self.active_profile.get("name") == removed.get("name") and
+                self.active_profile.get("mac") == removed.get("mac")):
+            self.active_profile = None
+            self.active_profile_label.configure(text="Aktywny: (brak)")
+        self._refresh_profile_tree()
+        self._refresh_player_profile_list()
+        self._log(f"Usunięto profil: {removed.get('name', '?')}", "info")
+
+    def _edit_selected_player_profile(self):
+        sel = self.player_profile_listbox.curselection()
+        if not sel:
+            self._log("Zaznacz profil do edycji.", "warning")
+            return
+        idx = sel[0]
+        if idx >= len(self.profiles):
+            return
+        self.profile_tree.selection_set(self.profile_tree.get_children()[idx])
+        self._edit_profile()
 
     def _on_player_mac_select(self, event):
         sel = self.player_mac_listbox.curselection()
@@ -1672,8 +1845,11 @@ class App:
             mac = self.active_profile.get("mac", "")
             url = self.active_profile.get("url", "")
             proxy = self.active_profile.get("proxy", "")
-            if not proxy:
-                proxy = self._get_proxy_for_mac(mac)
+            if self.player_use_proxy_var.get():
+                if not proxy:
+                    proxy = self._get_proxy_for_mac(mac)
+            else:
+                proxy = None
             if not url:
                 url = self.url_entry.get().strip()
             return mac, url, proxy or None
@@ -1803,23 +1979,24 @@ class App:
     def _fetch_channels_worker(self, url_raw, mac, proxy):
         timeout = self._get_timeout()
         url = parse_url(url_raw)
-        cache_key = f"{url}|{mac}|{self.player_content_type}"
+        base_cache_key = f"{url}|{mac}|{self.player_content_type}"
+        genres_cache_key = f"{base_cache_key}|genres"
 
-        # Try cache first
+        # Try genres cache first
         cache = self._load_channels_cache()
-        cached = cache.get(cache_key)
-        if cached:
-            self.player_channels = cached.get("channels", [])
-            self.player_genres = cached.get("genres", [])
-            count = len(self.player_channels)
+        cached_genres = cache.get(genres_cache_key)
+        if cached_genres:
+            self.player_genres = cached_genres
+            self.player_channels = list(cached_genres)
+            count = len(cached_genres)
             self._log_safe(
-                f"Załadowano {count} kanałów z cache "
+                f"Załadowano {count} kategorii z cache "
                 f"({self.player_content_type}).", "info")
-            self._set_progress(100, f"Cache: {count} kanałów")
+            self._set_progress(100, f"Cache: {count} kategorii")
             self.root.after(0, self._populate_genre_menu)
             self.root.after(0, self._populate_channel_tree)
             self.root.after(0, lambda: self.player_status_label.configure(
-                text=f"{count} kanałów (cache)"))
+                text=f"{count} kategorii (cache)"))
 
             # Still do handshake for token
             self._set_progress(90, "Handshake...")
@@ -1846,45 +2023,25 @@ class App:
                             content_type=self.player_content_type,
                             timeout=timeout, proxy=proxy)
         self.player_genres = genres
+        self.player_channels = list(genres)
         self.root.after(0, self._populate_genre_menu)
-
-        # Fetch all channels
-        self._set_progress(60, "Pobieranie listy kanałów...")
-        all_items = []
-        page = 1
-        while True:
-            items = get_channels(url, mac, token, genre_id="*",
-                                 content_type=self.player_content_type,
-                                 page=page, timeout=timeout, proxy=proxy)
-            if not items:
-                break
-            all_items.extend(items)
-            if len(items) < 10:
-                break
-            page += 1
-            if page > 50:
-                break
-            progress = min(60 + page, 95)
-            self._set_progress(progress,
-                               f"Strona {page}... ({len(all_items)} el.)")
-
-        self.player_channels = all_items
-        self._log_safe(f"Pobrano {len(all_items)} elementów "
-                       f"({self.player_content_type}).", "success")
-        self._set_progress(100, f"Pobrano {len(all_items)} kanałów")
         self.root.after(0, self._populate_channel_tree)
-        self.root.after(0, lambda: self.player_status_label.configure(
-            text=f"{len(all_items)} kanałów"))
 
-        # Save to cache
-        cache[cache_key] = {
-            "channels": all_items,
-            "genres": genres,
-        }
+        # Save genres to cache
+        cache[genres_cache_key] = genres
         self._save_channels_cache(cache)
+
+        self._log_safe(f"Załadowano {len(genres)} kategorii "
+                       f"({self.player_content_type}).", "success")
+        self._set_progress(100, f"Wybierz kategorię ({len(genres)})")
+        self.root.after(0, lambda: self.player_status_label.configure(
+            text=f"{len(genres)} kategorii — wybierz kategorię"))
 
         # Also fetch account info
         self._fetch_account_info_worker(url, mac, token, proxy)
+
+    def _genre_channels_cache_key(self, url, mac, content_type, genre_id):
+        return f"{url}|{mac}|{content_type}|genre|{genre_id}"
 
     def _fetch_genre_channels(self, genre_id):
         mac, url_raw, proxy = self._get_player_mac_url_proxy()
@@ -1905,7 +2062,11 @@ class App:
             return
         genre_name = self.genre_var.get()
         if genre_name == "Wszystkie":
-            genre_id = "*"
+            self.player_channels = list(self.player_genres)
+            self.root.after(0, self._populate_channel_tree)
+            self.root.after(0, lambda: self.player_status_label.configure(
+                text=f"{len(self.player_genres)} kategorii"))
+            return
         else:
             genre_id = "*"
             for g in self.player_genres:
@@ -1924,6 +2085,19 @@ class App:
     def _fetch_genre_worker(self, url_raw, mac, proxy, genre_id):
         timeout = self._get_timeout()
         url = parse_url(url_raw)
+
+        cache = self._load_channels_cache()
+        genre_cache_key = self._genre_channels_cache_key(
+            url, mac, self.player_content_type, genre_id)
+        cached_items = cache.get(genre_cache_key)
+        if cached_items is not None:
+            self.player_channels = cached_items
+            self._set_progress(100, f"Cache: {len(cached_items)} kanałów")
+            self.root.after(0, self._populate_channel_tree)
+            self.root.after(0, lambda: self.player_status_label.configure(
+                text=f"{len(cached_items)} kanałów (cache)"))
+            return
+
         items = []
         page = 1
         while True:
@@ -1940,6 +2114,10 @@ class App:
             if page > 50:
                 break
         self.player_channels = items
+
+        cache[genre_cache_key] = items
+        self._save_channels_cache(cache)
+
         self._set_progress(100, f"{len(items)} kanałów")
         self.root.after(0, self._populate_channel_tree)
 
@@ -2093,8 +2271,10 @@ class App:
             wid = str(int(self.player_frame.winfo_id()))
             if sys.platform == "win32":
                 vo = "gpu"
+            elif sys.platform == "darwin":
+                vo = "libmpv"
             else:
-                vo = "x11"
+                vo = "gpu"
             self.mpv_player = mpv.MPV(
                 wid=wid,
                 vo=vo,
@@ -2181,6 +2361,12 @@ class App:
                 pass
 
     def _player_fullscreen(self):
+        if self.mpv_player:
+            try:
+                self.mpv_player.fullscreen = not bool(self.mpv_player.fullscreen)
+                return
+            except Exception:
+                pass
         is_fs = self.root.attributes("-fullscreen")
         self.root.attributes("-fullscreen", not is_fs)
 
@@ -2244,12 +2430,15 @@ class App:
         self._set_progress(100, f"▶ {name}")
         self.current_stream_url = stream_url
 
-        # Play in embedded mpv
+        # Play in embedded mpv on UI thread
+        self.root.after(0, self._play_stream_on_ui, stream_url)
+
+    def _play_stream_on_ui(self, stream_url):
         ok = self._mpv_play_url(stream_url)
         if ok:
-            self._log_safe("Odtwarzanie w wbudowanym mpv.", "success")
+            self._log("Odtwarzanie w wbudowanym mpv.", "success")
         else:
-            self._log_safe(
+            self._log(
                 "mpv niedostępny. Sprawdź libmpv-2.dll i python-mpv (Windows).",
                 "error")
 
