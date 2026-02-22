@@ -68,6 +68,16 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
                 if (not os.path.exists(dst) or
                         os.path.getsize(src) != os.path.getsize(dst)):
                     shutil.copy2(src, dst)
+                # Verify the DLL is actually loadable (catches v3/arch mismatch)
+                try:
+                    ctypes.CDLL(dst)
+                except OSError:
+                    # DLL exists but won't load — wrong arch / v3 on old CPU
+                    try:
+                        os.remove(dst)
+                    except OSError:
+                        pass
+                    continue
                 return target_dir
             except Exception:
                 continue

@@ -10,8 +10,8 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "FLIPPER_DATA_DIR=%LOCALAPPDATA%\Flipper"
 set "MPV_EXTRACT_DIR=%FLIPPER_DATA_DIR%\mpv"
-set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/mpv-dev-x86_64-v3-20260222-git-250d605.7z"
-set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-v3-20260222-git-250d605.7z"
+set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/mpv-dev-x86_64-20260222-git-250d605.7z"
+set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-20260222-git-250d605.7z"
 set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
 set "DESKTOP_DIR="
@@ -48,6 +48,19 @@ echo [1/6] Finished.
 REM ── Step 2: Ensure libmpv DLL ──────────────────────────
 echo.
 echo [2/6] Ensuring libmpv-2.dll...
+
+REM Delete old v3 DLL if present (wrong arch causes "not a valid Win32 application")
+if exist "%MPV_DLL%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\",SetLastError=true)]public static extern IntPtr LoadLibraryEx(string lpFileName,IntPtr hFile,uint dwFlags);[DllImport(\"kernel32.dll\")]public static extern bool FreeLibrary(IntPtr hModule);' -Name W -Namespace K; $h=[K.W]::LoadLibraryEx('%MPV_DLL%',[IntPtr]::Zero,1); if($h -eq [IntPtr]::Zero){Write-Host 'BAD';exit 1}else{[K.W]::FreeLibrary($h);Write-Host 'OK';exit 0} } catch {Write-Host 'BAD';exit 1}"
+    if errorlevel 1 (
+        echo     Existing DLL is invalid/incompatible. Removing...
+        del /f "%MPV_DLL%" >nul 2>nul
+    ) else (
+        echo     Existing DLL is valid.
+        goto :mpv_ready
+    )
+)
+
 if exist "%MPV_DLL%" goto :mpv_ready
 
 echo     DLL not found. Downloading...
