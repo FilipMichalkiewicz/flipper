@@ -35,14 +35,9 @@ if not exist "%FLIPPER_DATA_DIR%" mkdir "%FLIPPER_DATA_DIR%"
 if not exist "%MPV_EXTRACT_DIR%" mkdir "%MPV_EXTRACT_DIR%"
 
 echo [1/6] Installing dependencies...
-%PYTHON_EXE% %PYTHON_ARGS% -m pip install --upgrade pip
-if errorlevel 1 (
-	echo WARNING: pip upgrade failed, continuing...
-)
-%PYTHON_EXE% %PYTHON_ARGS% -m pip install --upgrade pyinstaller python-mpv py7zr
-if errorlevel 1 (
-	echo WARNING: dependency install failed, attempting build anyway...
-)
+call %PYTHON_EXE% %PYTHON_ARGS% -m pip install -r "%SCRIPT_DIR%\requirements.txt" --quiet 2>nul
+call %PYTHON_EXE% %PYTHON_ARGS% -m pip install pyinstaller py7zr --quiet 2>nul
+echo Dependencies installed (or already present).
 
 echo [2/6] Ensuring libmpv-2.dll (download + extract if missing)...
 if not exist "%MPV_DLL%" (
@@ -91,7 +86,7 @@ if not exist "%MPV_DLL%" (
 )
 
 REM Intentionally do not embed libmpv in --onefile to avoid using Temp\_MEI path.
-%PYTHON_EXE% %PYTHON_ARGS% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
+call %PYTHON_EXE% %PYTHON_ARGS% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
 if errorlevel 1 goto :fail
 
 echo [6/6] Copying Flipper.exe to Desktop...
@@ -135,7 +130,7 @@ if not defined EXTRACTED_OK (
 )
 
 if not defined EXTRACTED_OK (
-	%PYTHON_EXE% %PYTHON_ARGS% -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1], mode='r'); z.extractall(path=sys.argv[2]); z.close()" "%ARCHIVE%" "%OUTDIR%"
+	call %PYTHON_EXE% %PYTHON_ARGS% -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1], mode='r'); z.extractall(path=sys.argv[2]); z.close()" "%ARCHIVE%" "%OUTDIR%"
 	if not errorlevel 1 set "EXTRACTED_OK=1"
 )
 
