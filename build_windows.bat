@@ -1,6 +1,8 @@
 @echo off
-REM Build script for Windows .exe
-REM Run this on a Windows machine with Python installed
+REM ══════════════════════════════════════════════════════════
+REM  Flipper — Windows Build Script
+REM  Uses flat goto/label pattern (no nested IF blocks).
+REM ══════════════════════════════════════════════════════════
 
 setlocal EnableExtensions EnableDelayedExpansion
 
@@ -13,134 +15,134 @@ set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-v3-20260222-git-250d605.7z"
 set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
 set "DESKTOP_DIR="
-set "PYTHON_EXE=python"
-set "PYTHON_ARGS="
+set "PY="
 
+REM ── Detect Python ──────────────────────────────────────
 where python >nul 2>nul
-if errorlevel 1 (
-	where py >nul 2>nul
- 	if not errorlevel 1 (
-		set "PYTHON_EXE=py"
-		set "PYTHON_ARGS=-3"
-	)
+if not errorlevel 1 (
+    set "PY=python"
+    goto :py_ok
 )
-
-where %PYTHON_EXE% >nul 2>nul
-if errorlevel 1 (
-	echo ERROR: Python not found in PATH.
-	goto :fail
+where py >nul 2>nul
+if not errorlevel 1 (
+    set "PY=py -3"
+    goto :py_ok
 )
+echo ERROR: Python not found in PATH.
+goto :fail
 
+:py_ok
+echo Using: %PY%
 if not exist "%FLIPPER_DATA_DIR%" mkdir "%FLIPPER_DATA_DIR%"
 if not exist "%MPV_EXTRACT_DIR%" mkdir "%MPV_EXTRACT_DIR%"
 
+REM ── Step 1: Dependencies ───────────────────────────────
+echo.
 echo [1/6] Installing dependencies...
-call %PYTHON_EXE% %PYTHON_ARGS% -m pip install -r "%SCRIPT_DIR%\requirements.txt" --quiet 2>nul
-call %PYTHON_EXE% %PYTHON_ARGS% -m pip install pyinstaller py7zr --quiet 2>nul
-echo Dependencies installed (or already present).
+cmd /c %PY% -m pip install -r "%SCRIPT_DIR%\requirements.txt"
+echo     requirements.txt done (rc=%errorlevel%)
+cmd /c %PY% -m pip install pyinstaller py7zr
+echo     pyinstaller+py7zr done (rc=%errorlevel%)
+echo [1/6] Finished.
 
-echo [2/6] Ensuring libmpv-2.dll (download + extract if missing)...
-if not exist "%MPV_DLL%" (
-	echo libmpv-2.dll not found in %MPV_EXTRACT_DIR%. Downloading winbuild package...
-	powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-		"Invoke-WebRequest -Uri '%MPV_URL%' -OutFile '%MPV_ARCHIVE%'"
-	if errorlevel 1 (
-		echo WARNING: Download failed: %MPV_URL%
-	)
+REM ── Step 2: Ensure libmpv DLL ──────────────────────────
+echo.
+echo [2/6] Ensuring libmpv-2.dll...
+if exist "%MPV_DLL%" goto :mpv_ready
 
-	if exist "%MPV_ARCHIVE%" (
-		echo Extracting archive (fast path: tar/7z, fallback: py7zr)...
-		call :extract_mpv "%MPV_ARCHIVE%" "%MPV_EXTRACT_DIR%"
-
-		for /f "delims=" %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path ''%MPV_EXTRACT_DIR%'' -Filter ''libmpv-2.dll'' -Recurse -File | Select-Object -First 1 -ExpandProperty FullName"') do set "MPV_DLL=%%I"
-	)
+echo     DLL not found. Downloading...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%MPV_URL%' -OutFile '%MPV_ARCHIVE%'"
+if not exist "%MPV_ARCHIVE%" (
+    echo     WARNING: Download failed.
+    goto :mpv_skip
 )
 
+echo     Extracting archive...
+call :extract_mpv
 if not exist "%MPV_DLL%" (
-	echo WARNING: Could not find libmpv-2.dll after download/extract.
-	echo Build will continue without embedded mpv DLL.
+    echo     Searching recursively...
+    for /f "delims=" %%I in ('dir /s /b "%MPV_EXTRACT_DIR%\libmpv-2.dll" 2^>nul') do set "MPV_DLL=%%I"
 )
 
-echo [3/6] Configuring PATH for current session...
+:mpv_ready
+if exist "%MPV_DLL%" echo     Found: %MPV_DLL%
+if not exist "%MPV_DLL%" echo     WARNING: libmpv-2.dll not found.
+
+:mpv_skip
+
+REM ── Step 3: Configure PATH ─────────────────────────────
+echo.
+echo [3/6] Configuring PATH...
 set "MPV_DLL_DIR=%MPV_EXTRACT_DIR%"
-if exist "%MPV_DLL%" (
-	for %%D in ("%MPV_DLL%") do set "MPV_DLL_DIR=%%~dpD"
-)
+if exist "%MPV_DLL%" for %%D in ("%MPV_DLL%") do set "MPV_DLL_DIR=%%~dpD"
 if "%MPV_DLL_DIR:~-1%"=="\" set "MPV_DLL_DIR=%MPV_DLL_DIR:~0,-1%"
 set "PATH=%MPV_DLL_DIR%;%PATH%"
+echo     PATH updated: %MPV_DLL_DIR%
 
-echo [4/6] Persisting PATH (User) if needed...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-	"$p=[Environment]::GetEnvironmentVariable('Path','User');" ^
-	"if (-not $p) { $p='' };" ^
-	"$d='%MPV_DLL_DIR%';" ^
-	"if (($p -split ';') -notcontains $d) {" ^
-	"  [Environment]::SetEnvironmentVariable('Path', ($p.TrimEnd(';') + ';' + $d).Trim(';'), 'User');" ^
-	"  Write-Host 'Added to user PATH:' $d;" ^
-	"} else { Write-Host 'Already in user PATH:' $d }"
+REM ── Step 4: Persist user PATH ──────────────────────────
+echo.
+echo [4/6] Persisting user PATH...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[Environment]::GetEnvironmentVariable('Path','User'); if(-not $p){$p=''}; $d='%MPV_DLL_DIR%'; if(($p -split ';') -notcontains $d){[Environment]::SetEnvironmentVariable('Path',($p.TrimEnd(';')+';'+$d).Trim(';'),'User'); Write-Host 'Added:' $d}else{Write-Host 'Already present:' $d}"
 
+REM ── Step 5: Build EXE ──────────────────────────────────
+echo.
 echo [5/6] Building executable...
-if not exist "%MPV_DLL%" (
-	echo WARNING: libmpv-2.dll not found in runtime dir: %MPV_DLL%
-	echo App may need to download/extract mpv on first start.
-)
+cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
+if not exist "%DIST_EXE%" goto :fail
+echo     OK: %DIST_EXE%
 
-REM Intentionally do not embed libmpv in --onefile to avoid using Temp\_MEI path.
-call %PYTHON_EXE% %PYTHON_ARGS% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
-if errorlevel 1 goto :fail
-
-echo [6/6] Copying Flipper.exe to Desktop...
+REM ── Step 6: Copy to Desktop ────────────────────────────
+echo.
+echo [6/6] Copying to Desktop...
 for /f "usebackq delims=" %%D in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP_DIR=%%D"
 if not defined DESKTOP_DIR set "DESKTOP_DIR=%USERPROFILE%\Desktop"
+if not exist "%DESKTOP_DIR%" goto :done
+copy /Y "%DIST_EXE%" "%DESKTOP_DIR%\Flipper.exe" >nul
+if not errorlevel 1 echo     Copied: %DESKTOP_DIR%\Flipper.exe
 
-if exist "%DIST_EXE%" (
-	copy /Y "%DIST_EXE%" "%DESKTOP_DIR%\Flipper.exe" >nul
-	if errorlevel 1 (
-		echo WARNING: Could not copy Flipper.exe to Desktop: %DESKTOP_DIR%
-	) else (
-		echo Copied: %DESKTOP_DIR%\Flipper.exe
-	)
-) else (
-	echo WARNING: Build output not found: %DIST_EXE%
-)
-
-echo Done.
+:done
 echo.
-echo Windows .exe created in dist\Flipper.exe
+echo ════════════════════════════════════════
+echo   BUILD COMPLETE: dist\Flipper.exe
+echo ════════════════════════════════════════
 pause
 goto :eof
 
+REM ══════════════════════════════════════════════════════════
+REM  SUBROUTINE: extract_mpv
+REM ══════════════════════════════════════════════════════════
 :extract_mpv
-set "EXTRACTED_OK="
-set "ARCHIVE=%~1"
-set "OUTDIR=%~2"
-
 where tar >nul 2>nul
+if errorlevel 1 goto :try_7z
+tar -xf "%MPV_ARCHIVE%" -C "%MPV_EXTRACT_DIR%" >nul 2>nul
 if not errorlevel 1 (
-	tar -xf "%ARCHIVE%" -C "%OUTDIR%" >nul 2>nul
-	if not errorlevel 1 set "EXTRACTED_OK=1"
+    echo     Extracted with tar.
+    exit /b 0
 )
 
-if not defined EXTRACTED_OK (
-	where 7z >nul 2>nul
-	if not errorlevel 1 (
-		7z x -y -o"%OUTDIR%" "%ARCHIVE%" >nul
-		if not errorlevel 1 set "EXTRACTED_OK=1"
-	)
+:try_7z
+where 7z >nul 2>nul
+if errorlevel 1 goto :try_py7zr
+7z x -y -o"%MPV_EXTRACT_DIR%" "%MPV_ARCHIVE%" >nul
+if not errorlevel 1 (
+    echo     Extracted with 7z.
+    exit /b 0
 )
 
-if not defined EXTRACTED_OK (
-	call %PYTHON_EXE% %PYTHON_ARGS% -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1], mode='r'); z.extractall(path=sys.argv[2]); z.close()" "%ARCHIVE%" "%OUTDIR%"
-	if not errorlevel 1 set "EXTRACTED_OK=1"
+:try_py7zr
+echo     Trying py7zr...
+cmd /c %PY% -c "import py7zr,sys; a=py7zr.SevenZipFile(sys.argv[1],'r'); a.extractall(sys.argv[2]); a.close()" "%MPV_ARCHIVE%" "%MPV_EXTRACT_DIR%"
+if not errorlevel 1 (
+    echo     Extracted with py7zr.
+    exit /b 0
 )
-
-if not defined EXTRACTED_OK (
-	echo WARNING: Failed to extract MPV archive.
-)
-exit /b 0
+echo     WARNING: All extraction methods failed.
+exit /b 1
 
 :fail
 echo.
-echo ERROR: Build failed. Check messages above.
+echo ════════════════════════════════════════
+echo   ERROR: Build failed!
+echo ════════════════════════════════════════
 pause
 exit /b 1
