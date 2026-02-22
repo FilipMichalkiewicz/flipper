@@ -18,6 +18,15 @@ from typing import Optional
 
 _WIN_DLL_HANDLES = []
 
+# Suppress Windows "not a valid Win32 application" popup dialogs
+# MUST be done before ANY DLL loading attempt (ctypes, import mpv, etc.)
+if sys.platform == "win32":
+    try:
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        ctypes.windll.kernel32.SetErrorMode(0x8003)
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog
 import threading
@@ -239,7 +248,7 @@ _ensure_mpv_runtime_windows()
 try:
     import mpv
     HAS_MPV = True
-except (ImportError, OSError):
+except Exception:
     HAS_MPV = False
 
 from scanner import (

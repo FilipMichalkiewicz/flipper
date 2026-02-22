@@ -10,12 +10,11 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "FLIPPER_DATA_DIR=%LOCALAPPDATA%\Flipper"
 set "MPV_EXTRACT_DIR=%FLIPPER_DATA_DIR%\mpv"
-set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/mpv-dev-x86_64-20260222-git-250d605.7z"
-set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-20260222-git-250d605.7z"
 set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
 set "DESKTOP_DIR="
 set "PY="
+set "MPV_ARCH=x86_64"
 
 REM ── Detect Python ──────────────────────────────────────
 where python >nul 2>nul
@@ -33,6 +32,16 @@ goto :fail
 
 :py_ok
 echo Using: %PY%
+
+REM ── Detect Python architecture (32/64 bit) ─────────────
+for /f "usebackq delims=" %%A in (`cmd /c %PY% -c "import struct; print(struct.calcsize('P')*8)"`) do set "PY_BITS=%%A"
+if "%PY_BITS%"=="32" set "MPV_ARCH=i686"
+if "%PY_BITS%"=="64" set "MPV_ARCH=x86_64"
+echo Python is %PY_BITS%-bit, using mpv arch: %MPV_ARCH%
+
+set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/mpv-dev-%MPV_ARCH%-20260222-git-250d605.7z"
+set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-%MPV_ARCH%-20260222-git-250d605.7z"
+
 if not exist "%FLIPPER_DATA_DIR%" mkdir "%FLIPPER_DATA_DIR%"
 if not exist "%MPV_EXTRACT_DIR%" mkdir "%MPV_EXTRACT_DIR%"
 
