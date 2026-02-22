@@ -1,6 +1,7 @@
 """
 Scanner module — portal API logic for MAC address scanning.
-Supports proxy rotation, HTTP status code reporting, VOD/Series content.
+Based on Stalker middleware portal protocol.
+Supports proxy rotation.
 """
 
 import hashlib
@@ -8,15 +9,13 @@ import requests
 import threading
 from random import randint
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 from constants import USER_AGENTS, ENDPOINTS, MONTHS_PL
 
-# Status codes that indicate proxy should be removed
-PROXY_BAD_CODES = {403, 404, 407, 500, 501, 502, 503, 504}
 
 # ── Shared proxy state ────────────────────────────────────
 _proxy_lock = threading.Lock()
-_proxy_list: List[str] = []
+_proxy_list: List[str] = []            # e.g. ["http://1.2.3.4:8080", ...]
 _proxy_index: int = 0
 _proxy_fail_counts: Dict[str, int] = {}
 _PROXY_MAX_FAILS = 3
@@ -52,6 +51,7 @@ def remove_proxy(proxy: str):
 
 
 def get_current_proxy() -> Optional[str]:
+    """Return the current proxy or None if list is empty."""
     with _proxy_lock:
         if not _proxy_list:
             return None
@@ -59,6 +59,7 @@ def get_current_proxy() -> Optional[str]:
 
 
 def rotate_proxy() -> Optional[str]:
+    """Move to the next proxy and return it."""
     global _proxy_index
     with _proxy_lock:
         if not _proxy_list:
@@ -68,7 +69,7 @@ def rotate_proxy() -> Optional[str]:
 
 
 def report_proxy_fail(proxy: str) -> bool:
-    """Report failure. Returns True if proxy was removed."""
+    """Report a proxy failure. Returns True if proxy was removed from list."""
     global _proxy_index
     with _proxy_lock:
         _proxy_fail_counts[proxy] = _proxy_fail_counts.get(proxy, 0) + 1
@@ -83,13 +84,9 @@ def report_proxy_fail(proxy: str) -> bool:
 
 
 def report_proxy_success(proxy: str):
+    """Reset failure counter on success."""
     with _proxy_lock:
         _proxy_fail_counts[proxy] = 0
-
-
-def should_remove_proxy(status_code: int) -> bool:
-    """Check if HTTP status code means proxy should be removed."""
-    return status_code in PROXY_BAD_CODES
 
 
 def _make_proxies_dict(proxy: Optional[str] = None) -> Optional[dict]:
@@ -110,17 +107,18 @@ def fetch_free_proxies() -> List[str]:
         try:
             r = requests.get(api_url, timeout=8)
             if r.status_code == 200:
-                for line in r.text.strip().split("\n"):
+                lines = r.text.strip().split("\n")
+                for line in lines:
                     line = line.strip()
                     if ":" in line and len(line) > 7:
-                        p = f"http://{line}" if not line.startswith("http") else line
-                        if p not in proxies:
-                            proxies.append(p)
+                        proxy = f"http://{line}" if not line.startswith("http") else line
+                        if proxy not in proxies:
+                            proxies.append(proxy)
         except Exception:
             continue
         if len(proxies) > 50:
             break
-    return proxies[:200]
+    return proxies[:200]  # cap at 200
 
 
 # ── Core helpers ──────────────────────────────────────────
@@ -130,6 +128,7 @@ def random_user_agent() -> str:
 
 
 def generate_random_mac(first_bytes: str = "00:1B:79") -> str:
+    """Generate a random MAC address with given first 3 bytes."""
     tail = [randint(0, 255) for _ in range(3)]
     return first_bytes.upper() + ":" + ":".join(f"{b:02X}" for b in tail)
 
@@ -146,65 +145,69 @@ def make_cookies(mac: str) -> dict:
 
 def make_params(mac: str, action: str, _type: str) -> dict:
     return {
-        "mac": mac, "user": mac, "password": mac,
-        "action": action, "type": _type, "token": "",
+        "mac": mac,
+        "user": mac,
+        "password": mac,
+        "action": action,
+        "type": _type,
+        "token": "",
     }
 
 
 def _request_get(url, params=None, headers=None, cookies=None,
                  timeout=5, proxy=None):
+    """Wrapper around requests.get with optional proxy."""
     proxies = _make_proxies_dict(proxy)
     return requests.get(url, params=params, headers=headers,
-                        cookies=cookies, timeout=timeout, proxies=proxies)
+                        cookies=cookies, timeout=timeout,
+                        proxies=proxies)
 
 
-# ── Portal functions (return status codes) ────────────────
+# ── Portal functions ──────────────────────────────────────
 
-def check_portal(url: str, timeout: int = 5,
-                 proxy: str = None) -> Tuple[bool, int]:
-    """Returns (responding, status_code)."""
+def check_portal(url: str, timeout: int = 5, proxy: str = None) -> bool:
+    """Check if a portal endpoint responds to a handshake."""
     try:
         mac = generate_random_mac()
         params = make_params(mac, "handshake", "stb")
         cookies = make_cookies(mac)
         headers = {"User-Agent": random_user_agent(), "Accept": "*/*"}
+
         res = _request_get(url, params=params, headers=headers,
                            cookies=cookies, timeout=timeout, proxy=proxy)
         if res.status_code == 200 and res.json() is not None:
-            return (True, res.status_code)
-        return (False, res.status_code)
+            return True
+        return False
     except Exception:
-        return (False, 0)
+        return False
 
 
 def get_handshake(url: str, mac: str, timeout: int = 5,
-                  proxy: str = None) -> Tuple[Optional[str], int]:
-    """Returns (token_or_none, status_code)."""
+                  proxy: str = None) -> Optional[str]:
+    """Perform handshake and retrieve bearer token."""
     try:
         cookies = make_cookies(mac)
         params = make_params(mac, "handshake", "stb")
         headers = {"User-Agent": random_user_agent(), "Accept": "*/*"}
+
         res = _request_get(url, params=params, headers=headers,
                            cookies=cookies, timeout=timeout, proxy=proxy)
         if res.status_code == 200 and res.json():
             token = res.json().get("js", {}).get("token", None)
-            return (token, res.status_code)
-        return (None, res.status_code)
+            return token
+        return None
     except Exception:
-        return (None, 0)
+        return None
 
 
 def get_responding_endpoint(server_address: str, timeout: int = 5,
-                            proxy: str = None) -> Tuple[Optional[str], int]:
-    """Returns (endpoint_or_none, last_status_code)."""
-    last_code = 0
+                            proxy: str = None) -> Optional[str]:
+    """Find an endpoint that responds on the given server."""
     for endpoint in ENDPOINTS:
         url = server_address + endpoint
-        ok, code = check_portal(url, timeout=timeout, proxy=proxy)
-        last_code = code
-        if ok:
-            return (endpoint, code)
-    return (None, last_code)
+        if check_portal(url, timeout=timeout, proxy=proxy):
+            return endpoint
+    return None
 
 
 def parse_url(url: str) -> str:
@@ -216,42 +219,34 @@ def parse_url(url: str) -> str:
 
 
 def check_mac(url: str, mac: str, timeout: int = 5,
-              proxy: str = None) -> dict:
+              proxy: str = None) -> Optional[List]:
     """
     Check if a MAC address is valid on the portal.
-    Returns dict: {found, mac, codes, expiry, timestamp, error}
-    codes is list of HTTP status codes encountered.
+    Returns [timestamp, expiry_string] or None.
     """
-    result = {
-        "found": False, "mac": mac, "codes": [],
-        "expiry": None, "timestamp": None, "error": None,
-    }
     try:
         cookies = make_cookies(mac)
-        token, hs_code = get_handshake(url, mac=mac, timeout=timeout,
-                                       proxy=proxy)
-        result["codes"].append(hs_code)
-
-        if not token:
-            result["error"] = f"Handshake failed (HTTP {hs_code})"
-            return result
+        handshake = get_handshake(url, mac=mac, timeout=timeout, proxy=proxy)
+        if not handshake:
+            return None
 
         params = make_params(mac, "get_main_info", "account_info")
         headers = {
             "User-Agent": random_user_agent(),
             "Accept": "*/*",
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {handshake}",
         }
+
         res = _request_get(url, params=params, headers=headers,
                            cookies=cookies, timeout=timeout, proxy=proxy)
-        result["codes"].append(res.status_code)
 
         if res.status_code == 200 and len(res.json().get("js", {})) > 0:
-            expires_at = res.json().get("js", {}).get("phone", "")
+            expires_at: str = res.json().get("js", {}).get("phone", "")
             if not expires_at or len(expires_at.strip()) < 5:
-                return result
+                return None
 
             str_datetime = expires_at
+
             for month_en, month_pl in MONTHS_PL.items():
                 if month_en in str_datetime:
                     str_datetime = str_datetime.replace(month_en, month_pl)
@@ -262,9 +257,7 @@ def check_mac(url: str, mac: str, timeout: int = 5,
                 if len(parts) >= 5:
                     month_str, day, year, hh, tf = parts[:5]
                     hour, minute = hh.split(":")
-                    month_num = str(
-                        list(MONTHS_PL.keys()).index(month_str) + 1
-                    ).zfill(2)
+                    month_num = str(list(MONTHS_PL.keys()).index(month_str) + 1).zfill(2)
                     day = day.zfill(2)
                     h = int(hour)
                     if tf.lower() == "pm" and h != 12:
@@ -277,41 +270,25 @@ def check_mac(url: str, mac: str, timeout: int = 5,
                         f"{day}/{month_num}/{year}/{hour_str}/{minute}",
                         "%d/%m/%Y/%H/%M",
                     ).timestamp()
-                    result.update(found=True, expiry=str_datetime,
-                                  timestamp=timestamp)
+                    return [timestamp, str_datetime]
                 else:
-                    result.update(found=True, expiry=str_datetime,
-                                  timestamp=0)
+                    return [0, str_datetime]
             except Exception:
-                result.update(found=True, expiry=str_datetime, timestamp=0)
-        else:
-            result["error"] = f"Account info (HTTP {res.status_code})"
+                return [0, str_datetime]
 
-        return result
-
-    except requests.exceptions.ProxyError:
-        result["error"] = "Proxy error"
-        result["codes"].append(0)
-        return result
-    except requests.exceptions.ConnectionError:
-        result["error"] = "Connection error"
-        result["codes"].append(0)
-        return result
-    except Exception as e:
-        result["error"] = str(e)[:80]
-        return result
+        return None
+    except Exception:
+        return None
 
 
-# ── Channel / IPTV / VOD functions ───────────────────────
+# ── Channel / IPTV functions ──────────────────────────────
 
-def get_genres(url: str, mac: str, token: str,
-               content_type: str = "itv", timeout: int = 5,
+def get_genres(url: str, mac: str, token: str, timeout: int = 5,
                proxy: str = None) -> List[Dict]:
-    """Get genres/categories. content_type: 'itv', 'vod', 'series'."""
+    """Get list of TV genres/categories."""
     try:
         cookies = make_cookies(mac)
-        action = "get_genres" if content_type == "itv" else "get_categories"
-        params = make_params(mac, action, content_type)
+        params = make_params(mac, "get_genres", "itv")
         headers = {
             "User-Agent": random_user_agent(),
             "Accept": "*/*",
@@ -328,29 +305,25 @@ def get_genres(url: str, mac: str, token: str,
         return []
 
 
-def get_channels(url: str, mac: str, token: str,
-                 genre_id: str = "*", content_type: str = "itv",
+def get_channels(url: str, mac: str, token: str, genre_id: str = "*",
                  page: int = 1, timeout: int = 5,
                  proxy: str = None) -> List[Dict]:
-    """Get items list. Works for itv, vod, series."""
+    """Get list of TV channels for a genre."""
     try:
         cookies = make_cookies(mac)
         params = {
-            "mac": mac, "user": mac, "password": mac,
+            "mac": mac,
+            "user": mac,
+            "password": mac,
             "action": "get_ordered_list",
-            "type": content_type,
+            "type": "itv",
+            "genre": genre_id,
             "p": str(page),
             "JsHttpRequest": "1-xml",
             "force_ch_link_check": "",
+            "sortby": "number",
             "fav": "0",
         }
-        if content_type == "itv":
-            params["genre"] = genre_id
-            params["sortby"] = "number"
-        else:
-            params["category"] = genre_id
-            params["sortby"] = "added"
-
         headers = {
             "User-Agent": random_user_agent(),
             "Accept": "*/*",
@@ -369,15 +342,16 @@ def get_channels(url: str, mac: str, token: str,
 
 
 def get_stream_url(url: str, mac: str, token: str, cmd: str,
-                   content_type: str = "itv", timeout: int = 5,
-                   proxy: str = None) -> Optional[str]:
-    """Get actual stream URL for a channel/vod item."""
+                   timeout: int = 5, proxy: str = None) -> Optional[str]:
+    """Get the actual stream URL for a channel."""
     try:
         cookies = make_cookies(mac)
         params = {
-            "mac": mac, "user": mac, "password": mac,
+            "mac": mac,
+            "user": mac,
+            "password": mac,
             "action": "create_link",
-            "type": content_type,
+            "type": "itv",
             "cmd": cmd,
             "JsHttpRequest": "1-xml",
         }
@@ -391,6 +365,7 @@ def get_stream_url(url: str, mac: str, token: str, cmd: str,
         if res.status_code == 200:
             js = res.json().get("js", {})
             cmd_out = js.get("cmd", "")
+            # Format: "ffmpeg http://..." -> extract url
             if cmd_out.startswith("ffmpeg "):
                 return cmd_out[7:].strip()
             elif cmd_out.startswith("http"):
