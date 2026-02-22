@@ -6,8 +6,8 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/ffmpeg-x86_64-v3-git-b22b65f2f.7z"
-set "MPV_ARCHIVE=%SCRIPT_DIR%\ffmpeg-x86_64-v3-git-b22b65f2f.7z"
+set "MPV_URL=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260222/mpv-dev-x86_64-v3-20260222-git-250d605.7z"
+set "MPV_ARCHIVE=%SCRIPT_DIR%\mpv-dev-x86_64-v3-20260222-git-250d605.7z"
 set "MPV_EXTRACT_DIR=%SCRIPT_DIR%\mpv_runtime"
 set "MPV_DLL=%SCRIPT_DIR%\libmpv-2.dll"
 
