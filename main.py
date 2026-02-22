@@ -26,6 +26,48 @@ import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
+
+def _get_flipper_data_dir() -> str:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            path = os.path.join(base, "Flipper")
+            os.makedirs(path, exist_ok=True)
+            return path
+    path = os.path.join(str(Path.home()), ".flipper")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _get_flipper_mpv_dir() -> str:
+    path = os.path.join(_get_flipper_data_dir(), "mpv")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
+    target_dir = _get_flipper_mpv_dir()
+    for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+        # Prefer bundled onefile extraction dir if available
+        meipass = getattr(sys, "_MEIPASS", None)
+        candidate_paths = []
+        if meipass:
+            candidate_paths.append(os.path.join(meipass, dll_name))
+        candidate_paths.append(os.path.join(os.path.dirname(__file__), dll_name))
+
+        for src in candidate_paths:
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(target_dir, dll_name)
+            try:
+                if (not os.path.exists(dst) or
+                        os.path.getsize(src) != os.path.getsize(dst)):
+                    shutil.copy2(src, dst)
+                return target_dir
+            except Exception:
+                continue
+    return None
+
 def _prepend_to_path(path: str):
     if not path:
         return
@@ -60,6 +102,10 @@ def _is_mpv_dll_loadable() -> bool:
 
 def _find_mpv_dll_dir() -> Optional[str]:
     candidates = []
+
+    # Stable runtime location first (avoids Temp onefile extraction path)
+    candidates.append(_get_flipper_mpv_dir())
+    candidates.append(_get_flipper_data_dir())
 
     mpv_bin = shutil.which("mpv")
     if mpv_bin:
@@ -136,6 +182,13 @@ def _try_install_mpv_with_winget() -> bool:
 def _ensure_mpv_runtime_windows():
     if sys.platform != "win32":
         return
+
+    runtime_dir = _copy_mpv_dll_to_runtime_dir()
+    if runtime_dir:
+        _add_windows_dll_directory(runtime_dir)
+        _prepend_to_path(runtime_dir)
+        if _is_mpv_dll_loadable():
+            return
 
     if _is_mpv_dll_loadable():
         return
@@ -240,7 +293,7 @@ class App:
         self.use_proxy_var = tk.BooleanVar(value=True)
         self.player_use_proxy_var = tk.BooleanVar(value=True)
         self.min_channels = 0
-        self.save_folder = ""  # empty = current directory
+        self.save_folder = _get_flipper_data_dir()
 
         # Account info
         self.account_info_text = ""
@@ -1014,6 +1067,8 @@ class App:
             highlightbackground="#333355")
         self.save_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
                                     padx=(0, 6), ipady=4)
+        if self.save_folder:
+            self.save_folder_entry.insert(0, self.save_folder)
         self._make_btn(row, "📂 Wybierz", ACCENT, "#1d4ed8",
                        self._choose_save_folder).pack(
             side=tk.LEFT, ipady=3, ipadx=6)
@@ -1406,10 +1461,21 @@ class App:
             pass
 
     def _load_session(self):
-        if not os.path.exists(SESSION_FILE):
+        session_paths = []
+        if self.save_folder:
+            session_paths.append(os.path.join(self.save_folder, SESSION_FILE))
+        session_paths.append(SESSION_FILE)
+
+        session_path = None
+        for path in session_paths:
+            if os.path.exists(path):
+                session_path = path
+                break
+
+        if not session_path:
             return
         try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            with open(session_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             return
