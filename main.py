@@ -102,6 +102,10 @@ class App:
         # Keep on top
         self.keep_on_top_var = tk.BooleanVar(value=False)
 
+        # Settings
+        self.verbose_logs_var = tk.BooleanVar(value=False)
+        self.save_folder = ""  # empty = current directory
+
         # Account info
         self.account_info_text = ""
 
@@ -190,6 +194,7 @@ class App:
         self._build_page_player(self.pages_frame)
         self._build_page_profiles(self.pages_frame)
         self._build_page_info(self.pages_frame)
+        self._build_page_settings(self.pages_frame)
 
         # Progress bar at bottom
         progress_frame = tk.Frame(right, bg=BG_BAR, height=28)
@@ -756,6 +761,77 @@ class App:
                        self._fetch_account_info).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
+    # ── Page 6: Settings ──────────────────────────────────
+    def _build_page_settings(self, pages):
+        page = tk.Frame(pages, bg=BG_DARK)
+        page.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.tab_pages.append(page)
+
+        tk.Label(page, text="⚙️ Ustawienia",
+                 font=("Helvetica", 16, "bold"),
+                 bg=BG_DARK, fg="#00d4ff").pack(padx=14, pady=(14, 10),
+                                                anchor=tk.W)
+
+        # Verbose logs checkbox
+        cb_frame = tk.Frame(page, bg=BG_DARK)
+        cb_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        tk.Checkbutton(cb_frame,
+                       text="Pokaż pełne zapytania i odpowiedzi w logach",
+                       variable=self.verbose_logs_var, bg=BG_DARK,
+                       fg="#d0d0e8", selectcolor=BG_INPUT,
+                       activebackground=BG_DARK,
+                       activeforeground="#ffffff",
+                       font=("Helvetica", 12)).pack(anchor=tk.W)
+        tk.Label(cb_frame,
+                 text="Gdy włączone, logi będą zawierać pełne URL zapytań "
+                      "oraz treść odpowiedzi serwera.",
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
+                 wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(2, 0))
+
+        self._sep_dark(page)
+
+        # Save folder
+        folder_frame = tk.Frame(page, bg=BG_DARK)
+        folder_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        tk.Label(folder_frame, text="📁 Folder zapisu danych:",
+                 font=("Helvetica", 12, "bold"),
+                 bg=BG_DARK, fg="#d0d0e8").pack(anchor=tk.W)
+
+        row = tk.Frame(folder_frame, bg=BG_DARK)
+        row.pack(fill=tk.X, pady=(4, 0))
+        self.save_folder_entry = tk.Entry(
+            row, font=("Helvetica", 11), bg=BG_INPUT, fg="#e0e0e0",
+            insertbackground="#ffffff", relief="flat",
+            highlightthickness=1, highlightcolor=ACCENT,
+            highlightbackground="#333355")
+        self.save_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                    padx=(0, 6), ipady=4)
+        self._make_btn(row, "📂 Wybierz", ACCENT, "#1d4ed8",
+                       self._choose_save_folder).pack(
+            side=tk.LEFT, ipady=3, ipadx=6)
+
+        tk.Label(folder_frame,
+                 text="Puste = bieżący katalog. Sesja, wyniki i eksporty "
+                      "będą zapisywane w wybranym folderze.",
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
+                 wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(4, 0))
+
+    def _sep_dark(self, parent):
+        tk.Frame(parent, height=1, bg="#333355").pack(
+            fill=tk.X, padx=20, pady=8)
+
+    def _choose_save_folder(self):
+        folder = filedialog.askdirectory(
+            title="Wybierz folder zapisu",
+            initialdir=self.save_folder or os.getcwd())
+        if folder:
+            self.save_folder = folder
+            self.save_folder_entry.delete(0, tk.END)
+            self.save_folder_entry.insert(0, folder)
+            self._log(f"Folder zapisu: {folder}", "info")
+
     # ══════════════════════════════════════════════════════
     #  WIDGET HELPERS
     # ══════════════════════════════════════════════════════
@@ -997,7 +1073,9 @@ class App:
         if not self.save_var.get() or not self.active_macs:
             return
         try:
-            with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+            save_path = (os.path.join(self.save_folder, RESULTS_FILE)
+                         if self.save_folder else RESULTS_FILE)
+            with open(save_path, "w", encoding="utf-8") as f:
                 f.write("# Flipper — auto-zapis\n")
                 for m in self.active_macs:
                     f.write(f"{m['mac']} | {m['expiry']} | {m['url']} | "
@@ -1025,9 +1103,13 @@ class App:
             "active_profile": self.active_profile,
             "checked_count": self.checked_count,
             "found_count": self.found_count,
+            "verbose_logs": self.verbose_logs_var.get(),
+            "save_folder": self.save_folder,
         }
         try:
-            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            save_path = (os.path.join(self.save_folder, SESSION_FILE)
+                         if self.save_folder else SESSION_FILE)
+            with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
@@ -1087,6 +1169,15 @@ class App:
         if self.active_profile:
             self.active_profile_label.configure(
                 text=f"Aktywny: {self.active_profile.get('name', '?')}")
+
+        if "verbose_logs" in data:
+            self.verbose_logs_var.set(data["verbose_logs"])
+        saved_folder = data.get("save_folder", "")
+        if saved_folder:
+            self.save_folder = saved_folder
+            if hasattr(self, 'save_folder_entry'):
+                self.save_folder_entry.delete(0, tk.END)
+                self.save_folder_entry.insert(0, saved_folder)
 
     # ══════════════════════════════════════════════════════
     #  PROXY TAB LOGIC
@@ -1338,6 +1429,7 @@ class App:
                                    "proxy": m.get("proxy", "")}
             self.active_profile_label.configure(
                 text=f"Aktywny: {m['mac']}")
+            self._fetch_channels()
 
     def _on_player_profile_select(self, event):
         sel = self.player_profile_listbox.curselection()
@@ -1348,6 +1440,7 @@ class App:
             self.active_profile = self.profiles[idx]
             self.active_profile_label.configure(
                 text=f"Aktywny: {self.active_profile['name']}")
+            self._fetch_channels()
 
     def _get_player_mac_url_proxy(self):
         if self.active_profile:
@@ -1740,9 +1833,15 @@ class App:
             return
         try:
             wid = str(int(self.player_frame.winfo_id()))
+            if sys.platform == "darwin":
+                vo = "libmpv"
+            elif sys.platform == "win32":
+                vo = "gpu"
+            else:
+                vo = "x11"
             self.mpv_player = mpv.MPV(
                 wid=wid,
-                vo="libmpv" if sys.platform == "darwin" else "x11",
+                vo=vo,
                 input_default_bindings=True,
                 input_vo_keyboard=True,
                 osc=True,
@@ -2054,9 +2153,20 @@ class App:
         result = check_mac(url, mac, timeout=timeout, proxy=proxy)
         codes = result.get("codes", [])
         codes_str = "/".join(str(c) for c in codes) if codes else "?"
+        elapsed = result.get("elapsed_ms", 0)
+        time_tag = f"{elapsed:.1f}ms"
 
         self.checked_count += 1
         self._update_stats_safe()
+
+        # Verbose logging
+        if self.verbose_logs_var.get():
+            req_info = result.get("request_info", "")
+            res_info = result.get("response_info", "")
+            if req_info:
+                self._log_safe(f"  ➡ {req_info}", "dim")
+            if res_info:
+                self._log_safe(f"  ⬅ {res_info[:300]}", "dim")
 
         if result["found"]:
             if proxy:
@@ -2064,7 +2174,7 @@ class App:
             self.found_count += 1
             self._update_stats_safe()
             self._log_safe(
-                f"✅ [{codes_str}] ZNALEZIONO: {mac} → "
+                f"✅ [{codes_str}] {time_tag} ZNALEZIONO: {mac} → "
                 f"{result['expiry']}", "success")
             self._add_active_mac(url, mac, result["expiry"], proxy)
             self._auto_save()
@@ -2076,10 +2186,12 @@ class App:
 
             if self.checked_count % 25 == 0:
                 self._log_safe(
-                    f"[{codes_str}] Sprawdzono {self.checked_count}, "
+                    f"[{codes_str}] {time_tag} Sprawdzono "
+                    f"{self.checked_count}, "
                     f"znaleziono {self.found_count}...", "info")
             else:
-                self._log_safe(f"[{codes_str}] {mac}", "dim")
+                self._log_safe(
+                    f"[{codes_str}] {time_tag} {mac}", "dim")
 
     def _scan_finished(self):
         self.is_running = False

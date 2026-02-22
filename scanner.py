@@ -4,6 +4,7 @@ Supports proxy rotation, HTTP status code reporting, VOD/Series content.
 """
 
 import hashlib
+import time
 import requests
 import threading
 from random import randint
@@ -219,13 +220,16 @@ def check_mac(url: str, mac: str, timeout: int = 5,
               proxy: str = None) -> dict:
     """
     Check if a MAC address is valid on the portal.
-    Returns dict: {found, mac, codes, expiry, timestamp, error}
+    Returns dict: {found, mac, codes, expiry, timestamp, error,
+                   elapsed_ms, request_info, response_info}
     codes is list of HTTP status codes encountered.
     """
     result = {
         "found": False, "mac": mac, "codes": [],
         "expiry": None, "timestamp": None, "error": None,
+        "elapsed_ms": 0.0, "request_info": "", "response_info": "",
     }
+    t_start = time.time()
     try:
         cookies = make_cookies(mac)
         token, hs_code = get_handshake(url, mac=mac, timeout=timeout,
@@ -234,6 +238,7 @@ def check_mac(url: str, mac: str, timeout: int = 5,
 
         if not token:
             result["error"] = f"Handshake failed (HTTP {hs_code})"
+            result["elapsed_ms"] = (time.time() - t_start) * 1000
             return result
 
         params = make_params(mac, "get_main_info", "account_info")
@@ -242,9 +247,16 @@ def check_mac(url: str, mac: str, timeout: int = 5,
             "Accept": "*/*",
             "Authorization": f"Bearer {token}",
         }
+        result["request_info"] = (
+            f"GET {url}?action=get_main_info&type=account_info"
+            f"&mac={mac}  proxy={proxy or 'none'}")
         res = _request_get(url, params=params, headers=headers,
                            cookies=cookies, timeout=timeout, proxy=proxy)
         result["codes"].append(res.status_code)
+        try:
+            result["response_info"] = res.text[:500]
+        except Exception:
+            pass
 
         if res.status_code == 200 and len(res.json().get("js", {})) > 0:
             expires_at = res.json().get("js", {}).get("phone", "")
@@ -287,18 +299,22 @@ def check_mac(url: str, mac: str, timeout: int = 5,
         else:
             result["error"] = f"Account info (HTTP {res.status_code})"
 
+        result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
 
     except requests.exceptions.ProxyError:
         result["error"] = "Proxy error"
         result["codes"].append(0)
+        result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
     except requests.exceptions.ConnectionError:
         result["error"] = "Connection error"
         result["codes"].append(0)
+        result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
     except Exception as e:
         result["error"] = str(e)[:80]
+        result["elapsed_ms"] = (time.time() - t_start) * 1000
         return result
 
 
