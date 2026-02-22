@@ -48,12 +48,17 @@ def _get_flipper_mpv_dir() -> str:
 def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
     target_dir = _get_flipper_mpv_dir()
     for dll_name in ("libmpv-2.dll", "libmpv.dll"):
-        # Prefer bundled onefile extraction dir if available
-        meipass = getattr(sys, "_MEIPASS", None)
+        # Prefer stable sources first; _MEIPASS only as last-resort fallback.
         candidate_paths = []
+        candidate_paths.append(os.path.join(target_dir, dll_name))
+        candidate_paths.append(
+            os.path.join(_get_flipper_data_dir(), dll_name)
+        )
+        candidate_paths.append(os.path.join(os.path.dirname(__file__), dll_name))
+
+        meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidate_paths.append(os.path.join(meipass, dll_name))
-        candidate_paths.append(os.path.join(os.path.dirname(__file__), dll_name))
 
         for src in candidate_paths:
             if not os.path.isfile(src):

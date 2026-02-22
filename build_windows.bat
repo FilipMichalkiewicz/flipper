@@ -26,7 +26,26 @@ if not exist "%MPV_DLL%" (
 		"Invoke-WebRequest -Uri '%MPV_URL%' -OutFile '%MPV_ARCHIVE%'"
 
 	if exist "%MPV_ARCHIVE%" (
-		python -c "import py7zr; py7zr.SevenZipFile(r'%MPV_ARCHIVE%', mode='r').extractall(path=r'%MPV_EXTRACT_DIR%'); print('Extracted')"
+		echo Extracting archive (fast path: tar/7z, fallback: py7zr)...
+		set "EXTRACTED_OK="
+
+		where tar >nul 2>nul
+		if not errorlevel 1 (
+			tar -xf "%MPV_ARCHIVE%" -C "%MPV_EXTRACT_DIR%" >nul 2>nul
+			if not errorlevel 1 set "EXTRACTED_OK=1"
+		)
+
+		if not defined EXTRACTED_OK (
+			where 7z >nul 2>nul
+			if not errorlevel 1 (
+				7z x -y -o"%MPV_EXTRACT_DIR%" "%MPV_ARCHIVE%" >nul
+				if not errorlevel 1 set "EXTRACTED_OK=1"
+			)
+		)
+
+		if not defined EXTRACTED_OK (
+			python -c "import py7zr; py7zr.SevenZipFile(r'%MPV_ARCHIVE%', mode='r').extractall(path=r'%MPV_EXTRACT_DIR%'); print('Extracted')"
+		)
 
 		for /f "delims=" %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path ''%MPV_EXTRACT_DIR%'' -Filter ''libmpv-2.dll'' -Recurse -File | Select-Object -First 1 -ExpandProperty FullName"') do set "MPV_DLL=%%I"
 	)
@@ -56,13 +75,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 	"} else { Write-Host 'Already in user PATH:' $d }"
 
 echo [5/6] Building executable...
-if exist "%MPV_DLL%" (
-	pyinstaller --name "Flipper" --windowed --onefile --clean --add-binary "%MPV_DLL%;." main.py
-) else (
+if not exist "%MPV_DLL%" (
 	echo WARNING: libmpv-2.dll not found in runtime dir: %MPV_DLL%
-	echo Building without embedded mpv DLL.
-	pyinstaller --name "Flipper" --windowed --onefile --clean main.py
+	echo App may need to download/extract mpv on first start.
 )
+
+REM Intentionally do not embed libmpv in --onefile to avoid using Temp\_MEI path.
+pyinstaller --name "Flipper" --windowed --onefile --clean main.py
 
 echo [6/6] Done.
 echo.
