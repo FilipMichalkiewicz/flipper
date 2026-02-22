@@ -1,16 +1,13 @@
 """
 Flipper — MAC Address Scanner + IPTV Player
 Plain Tkinter — macOS compatible.
-Features: proxy rotation, session persistence, profiles, embedded VLC player,
-channel search, navigation stack, progress bar, external player chooser,
-account info tab, keep-on-top, channel sorting.
+Features: proxy rotation, session persistence, profiles, embedded VLC player.
 """
 
 import os
 import sys
 import subprocess
 import platform
-import configparser
 
 if sys.platform == "darwin":
     os.environ["TK_SILENCE_DEPRECATION"] = "1"
@@ -34,13 +31,11 @@ from scanner import (
     get_handshake, get_genres, get_channels, get_stream_url,
     fetch_free_proxies, set_proxy_list, get_proxy_list, add_proxy,
     remove_proxy, get_current_proxy, rotate_proxy, report_proxy_fail,
-    report_proxy_success, should_remove_proxy, make_cookies, make_params,
-    random_user_agent, _request_get,
+    report_proxy_success, should_remove_proxy,
 )
 from constants import RESULTS_FILE, SESSION_FILE
 
 MAX_LOG_SAVE = 500
-CONFIG_FILE = "config.ini"
 BG_DARK = "#0a0a1e"
 BG_SIDEBAR = "#1a1a2e"
 BG_INPUT = "#12122a"
@@ -75,25 +70,12 @@ class App:
 
         # Player state
         self.player_token = None
-        self.player_channels = []      # all channels from current fetch
+        self.player_channels = []
         self.player_genres = []
         self.player_content_type = "itv"
         self.vlc_instance = None
         self.vlc_player = None
         self.current_tab = 0
-
-        # Navigation stack (like reference app)
-        self.nav_stack = []  # [{level, data, genre_name}, ...]
-
-        # External player
-        self.external_player_command = ""
-        self._load_config()
-
-        # Keep on top
-        self.keep_on_top_var = tk.BooleanVar(value=False)
-
-        # Account info
-        self.account_info_text = ""
 
         self._setup_styles()
         self._build_gui()
@@ -101,24 +83,6 @@ class App:
         self._auto_fetch_proxies_on_startup()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ── Config (external player etc.) ──────────────────────
-    def _load_config(self):
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
-        if "ExternalPlayer" in config:
-            self.external_player_command = config["ExternalPlayer"].get(
-                "Command", "")
-
-    def _save_config(self):
-        config = configparser.ConfigParser()
-        config["ExternalPlayer"] = {
-            "Command": self.external_player_command}
-        try:
-            with open(CONFIG_FILE, "w") as f:
-                config.write(f)
-        except Exception:
-            pass
 
     # ── Styles ─────────────────────────────────────────────
     def _setup_styles(self):
@@ -135,13 +99,6 @@ class App:
                         background="#2a2a4a", foreground="#ffffff",
                         font=("Menlo", 11, "bold"))
         style.map("Treeview", background=[("selected", ACCENT)])
-        # Progress bar style
-        style.configure("green.Horizontal.TProgressbar",
-                        troughcolor="#1e1e3a",
-                        background="#00b359",
-                        darkcolor="#009945",
-                        lightcolor="#00ff88",
-                        bordercolor="#333355")
 
     # ══════════════════════════════════════════════════════
     #  BUILD GUI
@@ -174,7 +131,7 @@ class App:
         self.tab_btns = []
         self.tab_pages = []
         tab_labels = ["📋 Logi", "✅ Aktywne MAC", "🌐 Proxy",
-                       "📺 Player", "👤 Profile", "ℹ️ Info"]
+                       "📺 Player", "👤 Profile"]
         for i, label in enumerate(tab_labels):
             b = self._make_btn(tab_bar, label, "#333355", "#444466",
                                lambda idx=i: self._switch_tab(idx))
@@ -191,23 +148,6 @@ class App:
         self._build_page_proxy(self.pages_frame)
         self._build_page_player(self.pages_frame)
         self._build_page_profiles(self.pages_frame)
-        self._build_page_info(self.pages_frame)
-
-        # Progress bar at bottom
-        progress_frame = tk.Frame(right, bg=BG_BAR, height=28)
-        progress_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        progress_frame.pack_propagate(False)
-
-        self.progress_bar = ttk.Progressbar(
-            progress_frame, orient=tk.HORIZONTAL, mode="determinate",
-            style="green.Horizontal.TProgressbar", maximum=100)
-        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                               padx=(6, 4), pady=4)
-
-        self.progress_label = tk.Label(
-            progress_frame, text="Gotowy", font=("Helvetica", 10),
-            bg=BG_BAR, fg=FG_DIM, anchor=tk.W)
-        self.progress_label.pack(side=tk.LEFT, padx=(0, 10))
 
         self._switch_tab(0)
 
@@ -236,38 +176,18 @@ class App:
         self._lbl(left, "Timeout (s)")
         self.timeout_entry = self._entry(left, "5")
 
-        # Checkboxes row
-        cb_frame = tk.Frame(left, bg=BG_SIDEBAR)
-        cb_frame.pack(fill=tk.X, padx=16, pady=(2, 4))
-
         self.save_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(cb_frame, text="Zapisuj",
+        tk.Checkbutton(left, text="Zapisuj do pliku",
                        variable=self.save_var, bg=BG_SIDEBAR,
                        fg="#aaaaaa", selectcolor=BG_INPUT,
                        activebackground=BG_SIDEBAR,
                        activeforeground="#cccccc",
-                       font=("Helvetica", 10)).pack(
-            side=tk.LEFT)
+                       font=("Helvetica", 11)).pack(
+            anchor=tk.W, padx=16, pady=(2, 4))
 
-        tk.Checkbutton(cb_frame, text="Zawsze na wierzchu",
-                       variable=self.keep_on_top_var, bg=BG_SIDEBAR,
-                       fg="#aaaaaa", selectcolor=BG_INPUT,
-                       activebackground=BG_SIDEBAR,
-                       activeforeground="#cccccc",
-                       font=("Helvetica", 10),
-                       command=self._toggle_keep_on_top).pack(
-            side=tk.LEFT, padx=(6, 0))
-
-        # Buttons
-        btn_row = tk.Frame(left, bg=BG_SIDEBAR)
-        btn_row.pack(fill=tk.X, padx=16, pady=(2, 6))
-        self._make_btn(btn_row, "📁 Eksportuj", "#333355", "#444466",
+        self._make_btn(left, "📁 Eksportuj wyniki", "#333355", "#444466",
                        self._export_results).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2), ipady=2)
-        self._make_btn(btn_row, "🎬 Odtwarzacz", "#333355", "#444466",
-                       self._choose_external_player).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0), ipady=2)
-
+            fill=tk.X, padx=16, pady=(2, 6))
         self._sep(left)
 
         self.start_btn = self._make_btn(left, "▶  START", "#00b359",
@@ -400,28 +320,11 @@ class App:
                            ("dim", "#555577")]:
             self.log_text.tag_config(tag, foreground=color)
 
-    # ── Page 1: Active MACs (with search) ───────────────
+    # ── Page 1: Active MACs ───────────────────────────────
     def _build_page_active(self, pages):
         page = tk.Frame(pages, bg=BG_DARK)
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.tab_pages.append(page)
-
-        # Search bar at top
-        search_frame = tk.Frame(page, bg=BG_DARK)
-        search_frame.pack(fill=tk.X, padx=4, pady=(4, 2))
-        tk.Label(search_frame, text="🔍", font=("Helvetica", 12),
-                 bg=BG_DARK, fg="#aaaaaa").pack(side=tk.LEFT, padx=(4, 2))
-        self.mac_search_var = tk.StringVar()
-        self.mac_search_entry = tk.Entry(
-            search_frame, textvariable=self.mac_search_var,
-            font=("Helvetica", 11), bg=BG_INPUT, fg="#e0e0e0",
-            insertbackground="#ffffff", relief="flat",
-            highlightthickness=1, highlightcolor=ACCENT,
-            highlightbackground="#333355")
-        self.mac_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                                   padx=(0, 4), ipady=3)
-        self.mac_search_entry.insert(0, "")
-        self.mac_search_var.trace_add("write", self._filter_active_macs)
 
         tf = tk.Frame(page, bg=BG_DARK)
         tf.pack(fill=tk.BOTH, expand=True)
@@ -522,7 +425,7 @@ class App:
         self.tab_pages.append(page)
 
         # RIGHT channel panel (pack first for fixed width)
-        right_panel = tk.Frame(page, bg=BG_DARK, width=330)
+        right_panel = tk.Frame(page, bg=BG_DARK, width=320)
         right_panel.pack(side=tk.RIGHT, fill=tk.Y)
         right_panel.pack_propagate(False)
 
@@ -544,7 +447,7 @@ class App:
 
         # Genre dropdown
         genre_frame = tk.Frame(right_panel, bg=BG_DARK)
-        genre_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
+        genre_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
         tk.Label(genre_frame, text="Kategoria:", font=("Helvetica", 10),
                  bg=BG_DARK, fg="#aaaaaa").pack(side=tk.LEFT, padx=(0, 4))
         self.genre_var = tk.StringVar(value="Wszystkie")
@@ -560,39 +463,6 @@ class App:
         self.genre_menu.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.genre_var.trace_add("write", self._on_genre_change)
 
-        # Channel search bar
-        ch_search_frame = tk.Frame(right_panel, bg=BG_DARK)
-        ch_search_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
-        tk.Label(ch_search_frame, text="🔍", font=("Helvetica", 11),
-                 bg=BG_DARK, fg="#aaaaaa").pack(side=tk.LEFT, padx=(0, 2))
-        self.channel_search_var = tk.StringVar()
-        ch_search_entry = tk.Entry(
-            ch_search_frame, textvariable=self.channel_search_var,
-            font=("Helvetica", 10), bg=BG_INPUT, fg="#e0e0e0",
-            insertbackground="#ffffff", relief="flat",
-            highlightthickness=1, highlightcolor=ACCENT,
-            highlightbackground="#333355")
-        ch_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                             padx=(0, 2), ipady=2)
-        self.channel_search_var.trace_add("write",
-                                          self._filter_channel_list)
-
-        # Sort + Go Back buttons
-        nav_frame = tk.Frame(right_panel, bg=BG_DARK)
-        nav_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
-        self.go_back_btn = self._make_btn(
-            nav_frame, "← Wróć", "#555577", "#666688",
-            self._nav_go_back)
-        self.go_back_btn.pack(side=tk.LEFT, padx=(0, 2), ipady=1, ipadx=4)
-        self._btn_disable(self.go_back_btn)
-        self._make_btn(nav_frame, "A→Z Sortuj", "#333355", "#444466",
-                       self._sort_channel_list).pack(
-            side=tk.LEFT, padx=2, ipady=1, ipadx=4)
-        self.nav_label = tk.Label(
-            nav_frame, text="", font=("Helvetica", 9),
-            bg=BG_DARK, fg=FG_DIM, anchor=tk.E)
-        self.nav_label.pack(side=tk.RIGHT, padx=4)
-
         # Channel list
         ch_frame = tk.Frame(right_panel, bg=BG_DARK)
         ch_frame.pack(fill=tk.BOTH, expand=True, padx=4)
@@ -602,14 +472,14 @@ class App:
         self.channel_tree.heading("num", text="#")
         self.channel_tree.heading("name", text="Kanał / Tytuł")
         self.channel_tree.column("num", width=45, minwidth=35)
-        self.channel_tree.column("name", width=260, minwidth=120)
+        self.channel_tree.column("name", width=250, minwidth=120)
         ch_sb = ttk.Scrollbar(ch_frame, orient=tk.VERTICAL,
                               command=self.channel_tree.yview)
         self.channel_tree.configure(yscrollcommand=ch_sb.set)
         ch_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.channel_tree.pack(fill=tk.BOTH, expand=True)
         self.channel_tree.bind("<Double-1>",
-                               self._on_channel_double_click)
+                               lambda e: self._play_selected_channel())
 
         self.channel_count_label = tk.Label(
             right_panel, text="Kanały: 0", font=("Helvetica", 10),
@@ -735,36 +605,6 @@ class App:
                        self._delete_profile).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
-    # ── Page 5: Info ──────────────────────────────────────
-    def _build_page_info(self, pages):
-        page = tk.Frame(pages, bg=BG_DARK)
-        page.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.tab_pages.append(page)
-
-        tk.Label(page, text="ℹ️ Informacje o koncie",
-                 font=("Helvetica", 16, "bold"),
-                 bg=BG_DARK, fg="#00d4ff").pack(padx=14, pady=(14, 6),
-                                                anchor=tk.W)
-
-        self.info_text = tk.Text(page, font=("Menlo", 12), bg=BG_DARK,
-                                 fg="#d0d0e8", wrap=tk.WORD,
-                                 state=tk.DISABLED, relief="flat", bd=8,
-                                 insertbackground="#ffffff")
-        info_sb = tk.Scrollbar(page, command=self.info_text.yview)
-        self.info_text.configure(yscrollcommand=info_sb.set)
-        info_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.info_text.pack(fill=tk.BOTH, expand=True)
-
-        for tag, color in [("label", "#55aaff"), ("value", "#e0e0e0"),
-                           ("highlight", "#00ff88"), ("warning", "#ffaa00")]:
-            self.info_text.tag_config(tag, foreground=color)
-
-        bot = tk.Frame(page, bg=BG_DARK)
-        bot.pack(fill=tk.X, padx=10, pady=(4, 10))
-        self._make_btn(bot, "🔄 Odśwież info", ACCENT, "#1d4ed8",
-                       self._fetch_account_info).pack(
-            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
-
     # ══════════════════════════════════════════════════════
     #  WIDGET HELPERS
     # ══════════════════════════════════════════════════════
@@ -796,13 +636,10 @@ class App:
         lbl._hover_bg = hover_color
         lbl._command = command
         lbl._enabled = True
-        lbl.bind("<Button-1>",
-                 lambda e: lbl._command() if lbl._enabled else None)
-        lbl.bind("<Enter>",
-                 lambda e: lbl.configure(bg=lbl._hover_bg)
+        lbl.bind("<Button-1>", lambda e: lbl._command() if lbl._enabled else None)
+        lbl.bind("<Enter>", lambda e: lbl.configure(bg=lbl._hover_bg)
                  if lbl._enabled else None)
-        lbl.bind("<Leave>",
-                 lambda e: lbl.configure(bg=lbl._normal_bg)
+        lbl.bind("<Leave>", lambda e: lbl.configure(bg=lbl._normal_bg)
                  if lbl._enabled else None)
         return lbl
 
@@ -844,67 +681,6 @@ class App:
                 btn.configure(bg="#333355")
 
     # ══════════════════════════════════════════════════════
-    #  PROGRESS BAR
-    # ══════════════════════════════════════════════════════
-
-    def _set_progress(self, value, text=""):
-        self.root.after(0, self._do_set_progress, value, text)
-
-    def _do_set_progress(self, value, text):
-        self.progress_bar["value"] = min(max(value, 0), 100)
-        if text:
-            self.progress_label.configure(text=text)
-
-    # ══════════════════════════════════════════════════════
-    #  KEEP ON TOP
-    # ══════════════════════════════════════════════════════
-
-    def _toggle_keep_on_top(self):
-        self.root.attributes("-topmost", self.keep_on_top_var.get())
-
-    # ══════════════════════════════════════════════════════
-    #  EXTERNAL PLAYER CHOOSER
-    # ══════════════════════════════════════════════════════
-
-    def _choose_external_player(self):
-        if platform.system() == "Darwin":
-            filetypes = [("Aplikacje", "*.app"), ("Wszystkie", "*.*")]
-            initial_dir = "/Applications"
-        elif platform.system() == "Windows":
-            filetypes = [("Pliki exe", "*.exe *.bat"),
-                         ("Wszystkie", "*.*")]
-            initial_dir = "C:\\"
-        else:
-            filetypes = [("Wszystkie", "*.*")]
-            initial_dir = os.path.expanduser("~")
-
-        path = filedialog.askopenfilename(
-            title="Wybierz zewnętrzny odtwarzacz",
-            filetypes=filetypes, initialdir=initial_dir)
-        if not path:
-            return
-
-        # macOS .app bundle — extract actual executable
-        if platform.system() == "Darwin" and path.endswith(".app"):
-            app_name = os.path.basename(path).replace(".app", "")
-            exe_path = os.path.join(path, "Contents", "MacOS", app_name)
-            if os.path.exists(exe_path):
-                self.external_player_command = exe_path
-            else:
-                # Try VLC specifically
-                vlc_exe = os.path.join(path, "Contents", "MacOS", "VLC")
-                if os.path.exists(vlc_exe):
-                    self.external_player_command = vlc_exe
-                else:
-                    self._log(f"Nie znaleziono exe w {path}", "error")
-                    return
-        else:
-            self.external_player_command = path
-
-        self._save_config()
-        self._log(f"Odtwarzacz: {self.external_player_command}", "success")
-
-    # ══════════════════════════════════════════════════════
     #  LOGGING
     # ══════════════════════════════════════════════════════
 
@@ -939,23 +715,8 @@ class App:
             text=f"Status: {text}", fg=color))
 
     # ══════════════════════════════════════════════════════
-    #  ACTIVE MAC MANAGEMENT (with search/filter)
+    #  ACTIVE MAC MANAGEMENT
     # ══════════════════════════════════════════════════════
-
-    def _filter_active_macs(self, *args):
-        """Filter the active MACs treeview by search text."""
-        query = self.mac_search_var.get().strip().lower()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for m in self.active_macs:
-            if query:
-                haystack = f"{m['url']} {m['mac']} {m['expiry']} " \
-                           f"{m.get('proxy', '')}".lower()
-                if query not in haystack:
-                    continue
-            self.tree.insert("", tk.END,
-                             values=(m["url"], m["mac"],
-                                     m["expiry"], m.get("proxy", "")))
 
     def _add_active_mac(self, url, mac, expiry, proxy=None):
         entry = {"url": url, "mac": mac, "expiry": expiry,
@@ -1036,8 +797,7 @@ class App:
             for m in self.active_macs:
                 f.write(f"{m['mac']} | {m['expiry']} | {m['url']} | "
                         f"{m.get('proxy', '')}\n")
-        self._log(f"Wyeksportowano {len(self.active_macs)} wyników.",
-                  "success")
+        self._log(f"Wyeksportowano {len(self.active_macs)} wyników.", "success")
 
     def _auto_save(self):
         if not self.save_var.get() or not self.active_macs:
@@ -1052,7 +812,7 @@ class App:
             pass
 
     # ══════════════════════════════════════════════════════
-    #  SESSION PERSISTENCE
+    #  SESSION PERSISTENCE (logs, macs, proxies, profiles)
     # ══════════════════════════════════════════════════════
 
     def _save_session(self):
@@ -1087,6 +847,7 @@ class App:
         except Exception:
             return
 
+        # Settings
         for key, widget in [("url", self.url_entry),
                             ("mac_prefix", self.mac_entry),
                             ("workers", self.workers_entry),
@@ -1099,16 +860,20 @@ class App:
         if "save_results" in data:
             self.save_var.set(data["save_results"])
 
+        # Counters
         self.checked_count = data.get("checked_count", 0)
         self.found_count = data.get("found_count", 0)
         self._update_stats()
 
+        # Active MACs
         for m in data.get("active_macs", []):
             self.active_macs.append(m)
             self._insert_mac_row(m)
 
+        # MAC-proxy map
         self.mac_proxy_map = data.get("mac_proxy_map", {})
 
+        # Logs
         for msg, tag in data.get("logs", []):
             self.log_text.configure(state=tk.NORMAL)
             self.log_text.insert(tk.END, f"{msg}\n", tag)
@@ -1121,11 +886,13 @@ class App:
             self.log_text.see(tk.END)
             self.log_text.configure(state=tk.DISABLED)
 
+        # Proxies
         saved_proxies = data.get("proxies", [])
         if saved_proxies:
             set_proxy_list(saved_proxies)
             self._refresh_proxy_tree()
 
+        # Profiles
         self.profiles = data.get("profiles", [])
         self._refresh_profile_tree()
 
@@ -1139,6 +906,7 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _get_active_proxy(self):
+        """Inline field first, then rotating list."""
         inline = self.proxy_inline_entry.get().strip()
         if inline:
             if not inline.startswith("http"):
@@ -1147,9 +915,11 @@ class App:
         return get_current_proxy()
 
     def _get_proxy_for_mac(self, mac):
+        """Get the proxy that was used to find this MAC."""
         return self.mac_proxy_map.get(mac)
 
     def _auto_fetch_proxies_on_startup(self):
+        """Fetch proxies on startup if none loaded from session."""
         if not get_proxy_list():
             self._log("Auto-pobieranie proxy przy starcie...", "info")
             threading.Thread(target=self._fetch_proxies_worker,
@@ -1160,7 +930,6 @@ class App:
 
     def _fetch_proxies(self):
         self._log("Pobieranie listy proxy z API...", "info")
-        self._set_progress(20, "Pobieranie proxy...")
         threading.Thread(target=self._fetch_proxies_worker,
                          daemon=True).start()
 
@@ -1170,10 +939,8 @@ class App:
             set_proxy_list(proxies)
             self._log_safe(f"Pobrano {len(proxies)} proxy.", "success")
             self.root.after(0, self._refresh_proxy_tree)
-            self._set_progress(100, f"Pobrano {len(proxies)} proxy")
         else:
             self._log_safe("Nie udało się pobrać proxy.", "error")
-            self._set_progress(100, "Błąd pobierania proxy")
 
     def _refresh_proxy_tree(self):
         for item in self.proxy_tree.get_children():
@@ -1210,6 +977,7 @@ class App:
         self._log(f"Usunięto proxy: {val}", "info")
 
     def _handle_proxy_fail(self, proxy, status_code=0):
+        """Handle proxy failure — rotate and possibly remove."""
         if not proxy:
             return
         if status_code and should_remove_proxy(status_code):
@@ -1266,8 +1034,7 @@ class App:
             self.active_profile = self.profiles[idx]
             self.active_profile_label.configure(
                 text=f"Aktywny: {self.active_profile['name']}")
-            self._log(f"Aktywny profil: {self.active_profile['name']}",
-                      "info")
+            self._log(f"Aktywny profil: {self.active_profile['name']}", "info")
 
     def _delete_profile(self):
         sel = self.profile_tree.selection()
@@ -1326,6 +1093,7 @@ class App:
                 text=f"Aktywny: {self.active_profile['name']}")
 
     def _get_player_mac_url_proxy(self):
+        """Get MAC, URL, proxy for the currently selected player source."""
         if self.active_profile:
             mac = self.active_profile.get("mac", "")
             url = self.active_profile.get("url", "")
@@ -1343,8 +1111,6 @@ class App:
 
     def _switch_content_type(self, ctype):
         self.player_content_type = ctype
-        self.nav_stack.clear()
-        self._update_nav_ui()
         for ct, btn in self.content_type_btns:
             if ct == ctype:
                 btn._normal_bg = ACCENT
@@ -1357,96 +1123,8 @@ class App:
         self._fetch_channels()
 
     def _on_genre_change(self, *args):
+        """When genre dropdown changes, re-fetch channels for that genre."""
         self._fetch_channels_for_genre()
-
-    # ══════════════════════════════════════════════════════
-    #  NAVIGATION STACK (like reference IPTV player)
-    # ══════════════════════════════════════════════════════
-
-    def _update_nav_ui(self):
-        """Update Go Back button and nav label based on stack."""
-        if self.nav_stack:
-            self._btn_enable(self.go_back_btn)
-            trail = " → ".join(s.get("label", "?") for s in self.nav_stack)
-            self.nav_label.configure(text=trail)
-        else:
-            self._btn_disable(self.go_back_btn)
-            self.nav_label.configure(text="")
-
-    def _nav_go_back(self):
-        """Pop navigation stack and restore previous channel list."""
-        if not self.nav_stack:
-            return
-        self.nav_stack.pop()
-        if self.nav_stack:
-            prev = self.nav_stack[-1]
-            self.player_channels = prev.get("channels", [])
-            self.root.after(0, self._populate_channel_tree)
-        else:
-            # Back to top-level genres
-            self._fetch_channels()
-        self._update_nav_ui()
-
-    def _on_channel_double_click(self, event):
-        """Handle double-click on channel list.
-        If item has 'cmd' -> play it.
-        If item is a genre/category -> navigate into it.
-        """
-        sel = self.channel_tree.selection()
-        if not sel:
-            return
-        idx = self.channel_tree.index(sel[0])
-        if idx >= len(self.player_channels):
-            return
-
-        ch = self.player_channels[idx]
-
-        # If it has a cmd/stream, play it
-        if ch.get("cmd"):
-            self._play_channel_entry(ch)
-            return
-
-        # If it looks like a genre/category entry (has id, title but no cmd),
-        # drill down into it
-        genre_id = ch.get("id")
-        genre_name = ch.get("name", ch.get("title", "?"))
-        if genre_id:
-            # Save current list on stack
-            self.nav_stack.append({
-                "label": genre_name,
-                "channels": list(self.player_channels),
-                "genre_id": str(genre_id),
-            })
-            self._update_nav_ui()
-            # Fetch channels for this genre
-            self._fetch_genre_channels(str(genre_id))
-
-    # ══════════════════════════════════════════════════════
-    #  CHANNEL SEARCH / FILTER
-    # ══════════════════════════════════════════════════════
-
-    def _filter_channel_list(self, *args):
-        """Filter channel tree by search text."""
-        query = self.channel_search_var.get().strip().lower()
-        for item in self.channel_tree.get_children():
-            self.channel_tree.delete(item)
-        count = 0
-        for ch in self.player_channels:
-            num = ch.get("number", ch.get("id", ""))
-            name = ch.get("name", ch.get("o_name", "?"))
-            if query and query not in str(name).lower() \
-                    and query not in str(num).lower():
-                continue
-            self.channel_tree.insert("", tk.END, values=(num, name))
-            count += 1
-        self.channel_count_label.configure(text=f"Kanały: {count}")
-
-    def _sort_channel_list(self):
-        """Sort channels alphabetically by name."""
-        self.player_channels.sort(
-            key=lambda c: c.get("name", c.get("o_name", "")).lower())
-        self._populate_channel_tree()
-        self._log("Posortowano kanały A→Z.", "info")
 
     # ══════════════════════════════════════════════════════
     #  CHANNEL FETCHING
@@ -1466,7 +1144,6 @@ class App:
         self._log(f"Pobieranie kanałów ({self.player_content_type}) "
                   f"dla {mac}...", "info")
         self.player_status_label.configure(text="Pobieranie kanałów...")
-        self._set_progress(10, "Łączenie z serwerem...")
 
         threading.Thread(target=self._fetch_channels_worker,
                          args=(url_raw, mac, proxy),
@@ -1474,37 +1151,31 @@ class App:
 
     def _fetch_channels_worker(self, url_raw, mac, proxy):
         server = parse_url(url_raw)
-        self._set_progress(20, "Szukam endpoint-u...")
         endpoint, ep_code = get_responding_endpoint(
             server, timeout=5, proxy=proxy)
         if not endpoint:
             self._log_safe(f"Serwer nie odpowiada (HTTP {ep_code}).", "error")
             if proxy and ep_code and should_remove_proxy(ep_code):
                 self._handle_proxy_fail(proxy, ep_code)
-            self._set_progress(100, "Błąd połączenia")
             self.root.after(0, lambda: self.player_status_label.configure(
                 text="Błąd połączenia"))
             return
 
         url = server + endpoint
-        self._set_progress(35, "Handshake...")
         token, hs_code = get_handshake(url, mac, timeout=5, proxy=proxy)
         if not token:
             self._log_safe(f"Handshake failed (HTTP {hs_code}).", "error")
-            self._set_progress(100, "Błąd handshake")
             return
         self.player_token = token
 
         # Fetch genres
-        self._set_progress(50, "Pobieranie kategorii...")
         genres = get_genres(url, mac, token,
                             content_type=self.player_content_type,
                             timeout=5, proxy=proxy)
         self.player_genres = genres
         self.root.after(0, self._populate_genre_menu)
 
-        # Fetch all channels
-        self._set_progress(60, "Pobieranie listy kanałów...")
+        # Fetch all channels (first load = all)
         all_items = []
         page = 1
         while True:
@@ -1519,36 +1190,16 @@ class App:
             page += 1
             if page > 50:
                 break
-            progress = min(60 + page, 95)
-            self._set_progress(progress,
-                               f"Strona {page}... ({len(all_items)} el.)")
 
         self.player_channels = all_items
         self._log_safe(f"Pobrano {len(all_items)} elementów "
                        f"({self.player_content_type}).", "success")
-        self._set_progress(100, f"Pobrano {len(all_items)} kanałów")
         self.root.after(0, self._populate_channel_tree)
         self.root.after(0, lambda: self.player_status_label.configure(
             text=f"{len(all_items)} kanałów"))
 
-        # Also fetch account info in the background
-        self._fetch_account_info_worker(url, mac, token, proxy)
-
-    def _fetch_genre_channels(self, genre_id):
-        """Fetch channels for a specific genre (used by nav stack)."""
-        mac, url_raw, proxy = self._get_player_mac_url_proxy()
-        if not mac or not self.player_token:
-            return
-        if not url_raw:
-            url_raw = self.url_entry.get().strip()
-        if not url_raw:
-            return
-        self._set_progress(30, f"Pobieranie kategorii...")
-        threading.Thread(
-            target=self._fetch_genre_worker,
-            args=(url_raw, mac, proxy, genre_id), daemon=True).start()
-
     def _fetch_channels_for_genre(self):
+        """Re-fetch channels for selected genre (from dropdown)."""
         mac, url_raw, proxy = self._get_player_mac_url_proxy()
         if not mac or not self.player_token:
             return
@@ -1575,7 +1226,6 @@ class App:
         server = parse_url(url_raw)
         endpoint, _ = get_responding_endpoint(server, timeout=5, proxy=proxy)
         if not endpoint:
-            self._set_progress(100, "Brak połączenia")
             return
         url = server + endpoint
         items = []
@@ -1594,7 +1244,6 @@ class App:
             if page > 50:
                 break
         self.player_channels = items
-        self._set_progress(100, f"{len(items)} kanałów")
         self.root.after(0, self._populate_channel_tree)
 
     def _populate_genre_menu(self):
@@ -1608,139 +1257,14 @@ class App:
                              command=lambda n=name: self.genre_var.set(n))
 
     def _populate_channel_tree(self):
-        query = self.channel_search_var.get().strip().lower()
         for item in self.channel_tree.get_children():
             self.channel_tree.delete(item)
-        count = 0
         for ch in self.player_channels:
             num = ch.get("number", ch.get("id", ""))
             name = ch.get("name", ch.get("o_name", "?"))
-            if query and query not in str(name).lower() \
-                    and query not in str(num).lower():
-                continue
             self.channel_tree.insert("", tk.END, values=(num, name))
-            count += 1
-        self.channel_count_label.configure(text=f"Kanały: {count}")
-
-    # ══════════════════════════════════════════════════════
-    #  ACCOUNT INFO (Info tab)
-    # ══════════════════════════════════════════════════════
-
-    def _fetch_account_info(self):
-        mac, url_raw, proxy = self._get_player_mac_url_proxy()
-        if not mac:
-            self._log("Wybierz MAC lub profil aby pobrać info.", "warning")
-            return
-        if not url_raw:
-            url_raw = self.url_entry.get().strip()
-        if not url_raw:
-            self._log("Podaj URL serwera.", "error")
-            return
-        self._log("Pobieranie informacji o koncie...", "info")
-        self._set_progress(20, "Pobieranie info...")
-        threading.Thread(target=self._fetch_account_info_thread,
-                         args=(url_raw, mac, proxy),
-                         daemon=True).start()
-
-    def _fetch_account_info_thread(self, url_raw, mac, proxy):
-        server = parse_url(url_raw)
-        endpoint, _ = get_responding_endpoint(server, timeout=5, proxy=proxy)
-        if not endpoint:
-            self._log_safe("Serwer nie odpowiada.", "error")
-            self._set_progress(100, "Błąd")
-            return
-        url = server + endpoint
-        token, _ = get_handshake(url, mac, timeout=5, proxy=proxy)
-        if not token:
-            self._log_safe("Handshake failed.", "error")
-            self._set_progress(100, "Błąd")
-            return
-        self._fetch_account_info_worker(url, mac, token, proxy)
-
-    def _fetch_account_info_worker(self, url, mac, token, proxy):
-        """Fetch account_info from portal and display in Info tab."""
-        try:
-            cookies = make_cookies(mac)
-            params = make_params(mac, "get_main_info", "account_info")
-            headers = {
-                "User-Agent": random_user_agent(),
-                "Accept": "*/*",
-                "Authorization": f"Bearer {token}",
-            }
-            res = _request_get(url, params=params, headers=headers,
-                               cookies=cookies, timeout=5, proxy=proxy)
-            if res.status_code != 200:
-                self._log_safe(f"Account info HTTP {res.status_code}",
-                               "error")
-                return
-
-            js = res.json().get("js", {})
-            if not js:
-                return
-
-            # Also try get_profile
-            profile = {}
-            try:
-                params2 = make_params(mac, "get_profile", "stb")
-                res2 = _request_get(url, params=params2, headers=headers,
-                                    cookies=cookies, timeout=5, proxy=proxy)
-                if res2.status_code == 200:
-                    profile = res2.json().get("js", {})
-            except Exception:
-                pass
-
-            info_lines = []
-            info_lines.append(("URL:", url))
-            info_lines.append(("MAC:", mac))
-            info_lines.append(("─" * 40, ""))
-
-            # Account info fields
-            phone = js.get("phone", "?")
-            info_lines.append(("Wygasa:", phone))
-
-            for key, label in [
-                ("mac", "MAC (serwer)"),
-                ("ip", "IP"),
-                ("login", "Login"),
-                ("status", "Status"),
-            ]:
-                val = js.get(key, "")
-                if val:
-                    info_lines.append((f"{label}:", str(val)))
-
-            # Profile fields
-            if profile:
-                info_lines.append(("─" * 40, ""))
-                for key, label in [
-                    ("name", "Nazwa profilu"),
-                    ("sname", "Nazwa STB"),
-                    ("stb_type", "Typ STB"),
-                    ("timezone", "Strefa czasowa"),
-                    ("locale", "Język"),
-                ]:
-                    val = profile.get(key, "")
-                    if val:
-                        info_lines.append((f"{label}:", str(val)))
-
-            self.root.after(0, self._display_account_info, info_lines)
-            self._set_progress(100, "Info pobrane")
-
-        except Exception as e:
-            self._log_safe(f"Błąd pobierania info: {e}", "error")
-            self._set_progress(100, "Błąd")
-
-    def _display_account_info(self, info_lines):
-        self.info_text.configure(state=tk.NORMAL)
-        self.info_text.delete("1.0", tk.END)
-        for label, value in info_lines:
-            if label.startswith("─"):
-                self.info_text.insert(tk.END, f"{label}\n", "label")
-            else:
-                self.info_text.insert(tk.END, f"{label} ", "label")
-                self.info_text.insert(tk.END, f"{value}\n",
-                                      "highlight" if "Wygasa" in label
-                                      else "value")
-        self.info_text.configure(state=tk.DISABLED)
+        self.channel_count_label.configure(
+            text=f"Kanały: {len(self.player_channels)}")
 
     # ══════════════════════════════════════════════════════
     #  VLC PLAYER
@@ -1759,6 +1283,7 @@ class App:
         try:
             media = self.vlc_instance.media_new(stream_url)
             self.vlc_player.set_media(media)
+            # Set the window for video output
             if sys.platform == "darwin":
                 self.vlc_player.set_nsobject(
                     self.player_frame.winfo_id())
@@ -1828,6 +1353,7 @@ class App:
         if HAS_VLC and self.vlc_player:
             self.vlc_player.toggle_fullscreen()
         else:
+            # Toggle root window fullscreen
             is_fs = self.root.attributes("-fullscreen")
             self.root.attributes("-fullscreen", not is_fs)
 
@@ -1844,10 +1370,6 @@ class App:
         if idx >= len(self.player_channels):
             return
         ch = self.player_channels[idx]
-        self._play_channel_entry(ch)
-
-    def _play_channel_entry(self, ch):
-        """Play a channel dict entry."""
         cmd = ch.get("cmd", "")
         name = ch.get("name", ch.get("o_name", "?"))
         if not cmd:
@@ -1857,7 +1379,6 @@ class App:
         self._log(f"Odtwarzanie: {name}...", "info")
         self.player_status_label.configure(text=f"▶ {name}")
         self.play_pause_btn.configure(text="⏸")
-        self._set_progress(30, f"Odtwarzanie: {name}")
 
         threading.Thread(target=self._play_stream_worker,
                          args=(cmd, name), daemon=True).start()
@@ -1873,7 +1394,6 @@ class App:
             server, timeout=5, proxy=proxy)
         if not endpoint:
             self._log_safe(f"Serwer nie odpowiada (HTTP {ep_code}).", "error")
-            self._set_progress(100, "Błąd")
             return
         url = server + endpoint
 
@@ -1882,7 +1402,6 @@ class App:
                 url, mac, timeout=5, proxy=proxy)
         if not self.player_token:
             self._log_safe("Nie udało się uzyskać tokena.", "error")
-            self._set_progress(100, "Błąd")
             return
 
         stream_url = get_stream_url(
@@ -1891,11 +1410,9 @@ class App:
             timeout=5, proxy=proxy)
         if not stream_url:
             self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
-            self._set_progress(100, "Błąd")
             return
 
         self._log_safe(f"Stream: {stream_url}", "success")
-        self._set_progress(100, f"▶ {name}")
 
         # Try VLC first
         if HAS_VLC and self.vlc_player:
@@ -1904,24 +1421,8 @@ class App:
                 self._log_safe("Odtwarzanie w wbudowanym VLC.", "success")
                 return
 
-        # Use configured external player, or fallback
-        self._open_in_external_player(stream_url, name)
-
-    def _open_in_external_player(self, stream_url, name=""):
-        """Open stream in external player."""
+        # Fallback: external player
         try:
-            if self.external_player_command and \
-                    os.path.exists(self.external_player_command):
-                ua_arg = (":http-user-agent=AppleCoreMedia/1.0.0.20L563 "
-                          "(Apple TV; U; CPU OS 16_5 like Mac OS X; en_us)")
-                subprocess.Popen([self.external_player_command,
-                                  stream_url, ua_arg])
-                self._log_safe(
-                    f"Otworzono w: {os.path.basename(self.external_player_command)}",
-                    "success")
-                return
-
-            # Fallback: system default
             if platform.system() == "Darwin":
                 vlc_path = "/Applications/VLC.app/Contents/MacOS/VLC"
                 if os.path.exists(vlc_path):
@@ -2029,7 +1530,6 @@ class App:
         self._btn_enable(self.pause_btn)
         self._btn_enable(self.stop_btn)
         self._set_status("Uruchamianie...", "#ffaa00")
-        self._set_progress(5, "Uruchamianie skanera...")
 
         server_address = parse_url(url_raw)
         self.scan_thread = threading.Thread(
@@ -2041,7 +1541,6 @@ class App:
     def _scan_worker(self, server_address, mac_prefix, workers, timeout):
         self._log_safe(f"Szukam endpoint-u na {server_address}...", "info")
         self._set_status("Szukanie endpoint-u...", "#55aaff")
-        self._set_progress(15, "Szukanie endpoint-u...")
 
         proxy = self._get_active_proxy()
         if proxy:
@@ -2062,16 +1561,14 @@ class App:
                     endpoint, ep_code = get_responding_endpoint(
                         server_address, timeout=timeout, proxy=proxy)
             if not endpoint:
-                self._log_safe(
-                    f"Serwer nie odpowiada (HTTP {ep_code})!", "error")
-                self._set_progress(100, "Serwer nie odpowiada")
+                self._log_safe(f"Serwer nie odpowiada (HTTP {ep_code})!",
+                               "error")
                 self._scan_finished()
                 return
 
         url = server_address + endpoint
         self._log_safe(f"Endpoint: {url}", "success")
         self._set_status("Skanowanie...", "#00ff88")
-        self._set_progress(30, "Skanowanie...")
 
         self.executor = ThreadPoolExecutor(max_workers=workers)
         futures = []
@@ -2128,6 +1625,7 @@ class App:
             self._add_active_mac(url, mac, result["expiry"], proxy)
             self._auto_save()
         else:
+            # Check proxy bad status
             for code in codes:
                 if code and should_remove_proxy(code) and proxy:
                     self._handle_proxy_fail(proxy, code)
@@ -2144,7 +1642,6 @@ class App:
         self.is_running = False
         self.is_paused = False
         self._set_status("Zakończono", "#888888")
-        self._set_progress(100, "Skanowanie zakończone")
         self.root.after(0, self._reset_buttons)
         self._log_safe(
             f"Zakończono. Sprawdzono: {self.checked_count}, "
@@ -2197,7 +1694,6 @@ class App:
             except Exception:
                 pass
         self._save_session()
-        self._save_config()
         self._auto_save()
         self.root.destroy()
 
