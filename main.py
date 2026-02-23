@@ -40,7 +40,81 @@ def _get_flipper_data_dir() -> str:
     desktop = os.path.join(str(Path.home()), "Desktop")
     path = os.path.join(desktop, "flipper-config")
     os.makedirs(path, exist_ok=True)
+
+    # One-time best-effort migration from legacy Windows location:
+    # %LOCALAPPDATA%\Flipper -> Desktop\flipper-config
+    if sys.platform == "win32":
+        try:
+            legacy_base = os.environ.get("LOCALAPPDATA")
+            if legacy_base:
+                legacy_path = os.path.join(legacy_base, "Flipper")
+                if os.path.isdir(legacy_path):
+                    _migrate_legacy_flipper_data(legacy_path, path)
+        except Exception:
+            pass
+
     return path
+
+
+def _migrate_legacy_flipper_data(legacy_path: str, new_path: str) -> None:
+    if not legacy_path or not new_path:
+        return
+    if os.path.abspath(legacy_path) == os.path.abspath(new_path):
+        return
+
+    # Copy common data files if missing in new location.
+    for filename in ("session.json", "results.txt", "config.ini", "channels_cache.json"):
+        src = os.path.join(legacy_path, filename)
+        dst = os.path.join(new_path, filename)
+        try:
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+        except Exception:
+            pass
+
+    # Copy mpv runtime DLLs to the new location if they exist in legacy.
+    legacy_mpv = os.path.join(legacy_path, "mpv")
+    new_mpv = os.path.join(new_path, "mpv")
+    try:
+        os.makedirs(new_mpv, exist_ok=True)
+    except Exception:
+        return
+
+    # If new mpv dir already has DLLs, do nothing.
+    try:
+        if any(name.lower().endswith('.dll') for name in os.listdir(new_mpv)):
+            return
+    except Exception:
+        pass
+
+    if not os.path.isdir(legacy_mpv):
+        return
+
+    # Find the directory containing libmpv in legacy (it may be nested).
+    src_dir = None
+    try:
+        for root, _dirs, files in os.walk(legacy_mpv):
+            lower_files = {f.lower() for f in files}
+            if "libmpv-2.dll" in lower_files or "libmpv.dll" in lower_files:
+                src_dir = root
+                break
+    except Exception:
+        src_dir = None
+
+    if not src_dir:
+        src_dir = legacy_mpv
+
+    # Copy all DLLs from the discovered directory.
+    try:
+        for name in os.listdir(src_dir):
+            if not name.lower().endswith('.dll'):
+                continue
+            src = os.path.join(src_dir, name)
+            dst = os.path.join(new_mpv, name)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    except Exception:
+        pass
 
 
 def _get_flipper_mpv_dir() -> str:
