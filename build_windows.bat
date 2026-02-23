@@ -86,6 +86,17 @@ if not exist "%MPV_DLL%" (
     for /f "delims=" %%I in ('dir /s /b "%MPV_EXTRACT_DIR%\libmpv-2.dll" 2^>nul') do set "MPV_DLL=%%I"
 )
 
+REM Copy ALL DLLs from extracted subdirectory to MPV_EXTRACT_DIR root
+if exist "%MPV_DLL%" (
+    for %%D in ("%MPV_DLL%") do set "MPV_SOURCE_DIR=%%~dpD"
+    echo     Copying all DLLs from !MPV_SOURCE_DIR! to %MPV_EXTRACT_DIR%...
+    for %%F in ("!MPV_SOURCE_DIR!*.dll") do (
+        copy /Y "%%F" "%MPV_EXTRACT_DIR%\" >nul 2>nul
+    )
+    REM Update MPV_DLL path to point to root location
+    set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
+)
+
 :mpv_ready
 if exist "%MPV_DLL%" echo     Found: %MPV_DLL%
 if not exist "%MPV_DLL%" echo     WARNING: libmpv-2.dll not found.

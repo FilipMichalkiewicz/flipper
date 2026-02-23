@@ -55,7 +55,9 @@ def _get_flipper_mpv_dir() -> str:
 
 
 def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
+    """Copy libmpv-2.dll AND all its dependencies to runtime directory"""
     target_dir = _get_flipper_mpv_dir()
+    
     for dll_name in ("libmpv-2.dll", "libmpv.dll"):
         # Prefer stable sources first; _MEIPASS only as last-resort fallback.
         candidate_paths = []
@@ -72,19 +74,39 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
         for src in candidate_paths:
             if not os.path.isfile(src):
                 continue
+            
+            # Found libmpv DLL - copy it AND all other DLLs from same directory
+            src_dir = os.path.dirname(src)
             dst = os.path.join(target_dir, dll_name)
+            
             try:
+                # Copy main libmpv DLL
                 if (not os.path.exists(dst) or
                         os.path.getsize(src) != os.path.getsize(dst)):
                     shutil.copy2(src, dst)
-                # Verify the DLL is actually loadable (catches v3/arch mismatch)
+                
+                # Copy ALL other DLL files from source directory (dependencies!)
+                # This includes avcodec, avformat, swscale, etc.
+                if src_dir != target_dir:
+                    try:
+                        for item in os.listdir(src_dir):
+                            if item.lower().endswith('.dll') and item != dll_name:
+                                src_dep = os.path.join(src_dir, item)
+                                dst_dep = os.path.join(target_dir, item)
+                                if os.path.isfile(src_dep):
+                                    if (not os.path.exists(dst_dep) or
+                                            os.path.getsize(src_dep) != os.path.getsize(dst_dep)):
+                                        shutil.copy2(src_dep, dst_dep)
+                    except Exception:
+                        pass  # Non-critical if dependency copy fails
+                
+                # Verify the main DLL is actually loadable
                 # Keep the handle to prevent DLL from being unloaded
                 try:
                     dll_handle = ctypes.CDLL(dst)
                     _WIN_DLL_HANDLES.append(dll_handle)
                 except OSError:
-                    # DLL exists but won't load — wrong arch / v3 on old CPU
-                    # Don't remove it immediately - it might be in use
+                    # DLL exists but won't load — wrong arch or missing dependencies
                     # Just skip to next candidate
                     continue
                 return target_dir
@@ -285,7 +307,7 @@ def _diagnose_mpv_availability():
         runtime_dir = _get_flipper_mpv_dir()
         info.append(f"Runtime dir: {runtime_dir}")
         
-        # Check for DLL files
+        # Check for main DLL files
         for dll_name in ("libmpv-2.dll", "libmpv.dll"):
             dll_path = os.path.join(runtime_dir, dll_name)
             if os.path.exists(dll_path):
@@ -299,6 +321,25 @@ def _diagnose_mpv_availability():
                     info.append(f"  → NIE ładowalny: {e}")
             else:
                 info.append(f"✗ {dll_name}: nie znaleziono")
+        
+        # Count and list other DLLs (dependencies)
+        try:
+            dll_files = [f for f in os.listdir(runtime_dir) 
+                        if f.lower().endswith('.dll') 
+                        and f not in ('libmpv-2.dll', 'libmpv.dll')]
+            if dll_files:
+                info.append(f"✓ Znaleziono {len(dll_files)} zależności DLL")
+                if len(dll_files) <= 10:
+                    for dll in sorted(dll_files):
+                        info.append(f"  - {dll}")
+                else:
+                    for dll in sorted(dll_files)[:5]:
+                        info.append(f"  - {dll}")
+                    info.append(f"  ... i {len(dll_files) - 5} więcej")
+            else:
+                info.append(f"⚠ Brak zależności DLL (może brakować ffmpeg itp.)")
+        except Exception:
+            pass
         
         # Check PATH
         path_env = os.environ.get("PATH", "")
