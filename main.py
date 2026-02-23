@@ -135,22 +135,29 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
 def _prepend_to_path(path: str):
     if not path:
         return
+    # MUST use absolute path — python-mpv requires all PATH entries to be
+    # absolute, otherwise ctypes.find_library returns a relative path which
+    # causes CDLL to fail with LOAD_LIBRARY_SEARCH_DEFAULT_DIRS.
+    abs_path = os.path.abspath(path)
     current = os.environ.get("PATH", "")
     parts = current.split(os.pathsep) if current else []
-    if path not in parts:
-        os.environ["PATH"] = path + os.pathsep + current
+    if abs_path not in parts:
+        os.environ["PATH"] = abs_path + os.pathsep + current
 
 
 def _add_windows_dll_directory(path: str):
     if sys.platform != "win32" or not path:
         return
+    # Must use absolute path for add_dll_directory
+    abs_path = os.path.abspath(path)
     add_dir = getattr(os, "add_dll_directory", None)
     if not add_dir:
         return
     try:
-        handle = add_dir(path)
+        handle = add_dir(abs_path)
         _WIN_DLL_HANDLES.append(handle)
-    except Exception:
+    except OSError:
+        # Already added or path doesn't exist, ignore
         pass
 
 
@@ -294,25 +301,36 @@ def _ensure_mpv_runtime_windows():
 
 _ensure_mpv_runtime_windows()
 
+# On Windows, verify DLL search paths are set up before importing mpv module.
+# python-mpv uses ctypes.util.find_library + CDLL with special flags.
+if sys.platform == "win32":
+    runtime_dir = _get_flipper_mpv_dir()
+    # Ensure absolute path is in PATH and DLL directories
+    _add_windows_dll_directory(runtime_dir)
+    _prepend_to_path(runtime_dir)
+    # Also ensure the data dir itself is registered
+    data_dir = _get_flipper_data_dir()
+    _add_windows_dll_directory(data_dir)
+    _prepend_to_path(data_dir)
+
 # Try importing mpv multiple times with aggressive path setup
 HAS_MPV = False
 MPV_IMPORT_ERROR = None
 
-for attempt in range(3):
+for _attempt in range(3):
     try:
         import mpv
         HAS_MPV = True
         break
     except Exception as e:
         MPV_IMPORT_ERROR = str(e)
-        if attempt < 2:
-            # Try one more time after ensuring runtime setup
-            if sys.platform == "win32":
-                runtime_dir = _copy_mpv_dll_to_runtime_dir()
-                if runtime_dir:
-                    _add_windows_dll_directory(runtime_dir)
-                    _prepend_to_path(runtime_dir)
-            time.sleep(0.1)
+        if _attempt < 2 and sys.platform == "win32":
+            # Retry: re-setup paths, copy deps again
+            rt = _copy_mpv_dll_to_runtime_dir()
+            if rt:
+                _add_windows_dll_directory(rt)
+                _prepend_to_path(rt)
+            time.sleep(0.2)
 
 from scanner import (
     generate_random_mac, check_mac, get_responding_endpoint, parse_url,
