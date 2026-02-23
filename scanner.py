@@ -439,6 +439,12 @@ def get_genres(url: str, mac: str, token: str,
             data = res.json().get("js", [])
             if isinstance(data, list):
                 return data
+            if isinstance(data, dict):
+                # Some portals wrap genres in {"result": [...]}
+                for key in ("result", "data", "items"):
+                    inner = data.get(key)
+                    if isinstance(inner, list):
+                        return inner
         return []
     except Exception:
         return []

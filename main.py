@@ -2676,7 +2676,7 @@ class App:
         count = 0
         for ch in self.player_channels:
             num = ch.get("number", ch.get("id", ""))
-            name = ch.get("name", ch.get("o_name", "?"))
+            name = ch.get("name", ch.get("title", ch.get("o_name", "?")))
             if query and query not in str(name).lower() \
                     and query not in str(num).lower():
                 continue
@@ -2686,7 +2686,7 @@ class App:
 
     def _sort_channel_list(self):
         self.player_channels.sort(
-            key=lambda c: c.get("name", c.get("o_name", "")).lower())
+            key=lambda c: c.get("name", c.get("title", c.get("o_name", ""))).lower())
         self._populate_channel_tree()
         self._log("Posortowano kanały A→Z.", "info")
 
@@ -2876,7 +2876,7 @@ class App:
         count = 0
         for ch in self.player_channels:
             num = ch.get("number", ch.get("id", ""))
-            name = ch.get("name", ch.get("o_name", "?"))
+            name = ch.get("name", ch.get("title", ch.get("o_name", "?")))
             if query and query not in str(name).lower() \
                     and query not in str(num).lower():
                 continue
