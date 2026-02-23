@@ -54,9 +54,29 @@ def _get_flipper_mpv_dir() -> str:
     return path
 
 
+def _load_dll_safe(dll_path: str) -> Optional[ctypes.CDLL]:
+    """Load a DLL with proper dependency search on Windows 10+.
+    Uses winmode=0 (Python 3.8+) to enable DLL directory search.
+    Falls back to standard loading on older Python."""
+    if not os.path.isfile(dll_path):
+        return None
+    try:
+        if sys.version_info >= (3, 8):
+            return ctypes.CDLL(dll_path, winmode=0)
+        else:
+            return ctypes.CDLL(dll_path)
+    except OSError:
+        return None
+
+
 def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
     """Copy libmpv-2.dll AND all its dependencies to runtime directory"""
     target_dir = _get_flipper_mpv_dir()
+    
+    # IMPORTANT: Register target_dir for DLL dependency search BEFORE loading
+    # On Windows 10+, DLL dependencies are NOT searched from PATH or cwd
+    _add_windows_dll_directory(target_dir)
+    _prepend_to_path(target_dir)
     
     for dll_name in ("libmpv-2.dll", "libmpv.dll"):
         # Prefer stable sources first; _MEIPASS only as last-resort fallback.
@@ -90,7 +110,7 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
                 if src_dir != target_dir:
                     try:
                         for item in os.listdir(src_dir):
-                            if item.lower().endswith('.dll') and item != dll_name:
+                            if item.lower().endswith(('.dll', '.dll.a')):
                                 src_dep = os.path.join(src_dir, item)
                                 dst_dep = os.path.join(target_dir, item)
                                 if os.path.isfile(src_dep):
@@ -101,15 +121,13 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
                         pass  # Non-critical if dependency copy fails
                 
                 # Verify the main DLL is actually loadable
-                # Keep the handle to prevent DLL from being unloaded
-                try:
-                    dll_handle = ctypes.CDLL(dst)
+                # Use winmode=0 to enable DLL directory search for dependencies
+                dll_handle = _load_dll_safe(dst)
+                if dll_handle:
                     _WIN_DLL_HANDLES.append(dll_handle)
-                except OSError:
-                    # DLL exists but won't load — wrong arch or missing dependencies
-                    # Just skip to next candidate
-                    continue
-                return target_dir
+                    return target_dir
+                # If loading failed, continue to next candidate
+                continue
             except Exception:
                 continue
     return None
@@ -139,10 +157,19 @@ def _add_windows_dll_directory(path: str):
 def _is_mpv_dll_loadable() -> bool:
     for dll_name in ("libmpv-2.dll", "libmpv.dll"):
         try:
-            ctypes.CDLL(dll_name)
+            if sys.version_info >= (3, 8):
+                ctypes.CDLL(dll_name, winmode=0)
+            else:
+                ctypes.CDLL(dll_name)
             return True
         except OSError:
             pass
+    # Also try full path in runtime dir
+    runtime_dir = _get_flipper_mpv_dir()
+    for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+        full = os.path.join(runtime_dir, dll_name)
+        if _load_dll_safe(full):
+            return True
     return False
 
 
