@@ -132,19 +132,71 @@ def _get_flipper_mpv_dir() -> str:
     return path
 
 
+def _set_dll_directory(path: str) -> bool:
+    """Set the default DLL search directory using SetDllDirectoryW.
+    This is CRITICAL for loading DLLs with dependencies on Windows."""
+    if sys.platform != "win32" or not path:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        # SetDllDirectoryW takes a wide string (Unicode)
+        kernel32.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+        kernel32.SetDllDirectoryW.restype = ctypes.c_bool
+        result = kernel32.SetDllDirectoryW(os.path.abspath(path))
+        return bool(result)
+    except Exception:
+        return False
+
+
 def _load_dll_safe(dll_path: str) -> Optional[ctypes.CDLL]:
     """Load a DLL with proper dependency search on Windows 10+.
-    Uses winmode=0 (Python 3.8+) to enable DLL directory search.
-    Falls back to standard loading on older Python."""
+    Uses multiple strategies to ensure dependencies can be found."""
     if not os.path.isfile(dll_path):
         return None
+    
+    abs_path = os.path.abspath(dll_path)
+    dll_dir = os.path.dirname(abs_path)
+    
+    # Strategy 1: Set DLL directory for dependency resolution
+    _set_dll_directory(dll_dir)
+    
+    # Strategy 2: Use add_dll_directory (Python 3.8+, Windows 10+)
+    _add_windows_dll_directory(dll_dir)
+    
+    # Strategy 3: Prepend to PATH
+    _prepend_to_path(dll_dir)
+    
+    # Try loading with different methods
+    load_errors = []
+    
+    # Method 1: winmode=0 (Python 3.8+) - enables default search path
+    if sys.version_info >= (3, 8):
+        try:
+            return ctypes.CDLL(abs_path, winmode=0)
+        except OSError as e:
+            load_errors.append(f"winmode=0: {e}")
+    
+    # Method 2: Standard CDLL with absolute path
     try:
-        if sys.version_info >= (3, 8):
-            return ctypes.CDLL(dll_path, winmode=0)
-        else:
-            return ctypes.CDLL(dll_path)
-    except OSError:
-        return None
+        return ctypes.CDLL(abs_path)
+    except OSError as e:
+        load_errors.append(f"CDLL: {e}")
+    
+    # Method 3: Try with LoadLibraryExW and LOAD_WITH_ALTERED_SEARCH_PATH
+    if sys.platform == "win32":
+        try:
+            LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+            kernel32 = ctypes.windll.kernel32
+            kernel32.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.LoadLibraryExW.restype = ctypes.c_void_p
+            handle = kernel32.LoadLibraryExW(abs_path, None, LOAD_WITH_ALTERED_SEARCH_PATH)
+            if handle:
+                # Wrap in CDLL
+                return ctypes.CDLL(abs_path)
+        except Exception as e:
+            load_errors.append(f"LoadLibraryExW: {e}")
+    
+    return None
 
 
 def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
@@ -408,6 +460,51 @@ if sys.platform == "win32":
             os.environ["PATH"] = os.pathsep.join(filtered)
     except Exception:
         pass
+    
+    # CRITICAL: Monkey-patch ctypes.util.find_library to return absolute paths
+    # python-mpv uses find_library internally, and relative paths fail with LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    import ctypes.util
+    _original_find_library = ctypes.util.find_library
+    
+    def _patched_find_library(name):
+        # Handle mpv-related library lookups
+        mpv_names = ("mpv", "mpv-2", "mpv-1", "libmpv", "libmpv-2", "libmpv-1")
+        if name in mpv_names or any(name.lower().startswith(n) for n in mpv_names):
+            # Return absolute path to our DLL
+            for dll_name in ("libmpv-2.dll", "libmpv.dll", "mpv-2.dll", "mpv.dll"):
+                dll_path = os.path.join(runtime_dir, dll_name)
+                if os.path.isfile(dll_path):
+                    abs_path = os.path.abspath(dll_path)
+                    # Pre-set DLL directory for dependency resolution
+                    _set_dll_directory(runtime_dir)
+                    return abs_path
+            # Also check data_dir
+            for dll_name in ("libmpv-2.dll", "libmpv.dll", "mpv-2.dll", "mpv.dll"):
+                dll_path = os.path.join(data_dir, dll_name)
+                if os.path.isfile(dll_path):
+                    abs_path = os.path.abspath(dll_path)
+                    _set_dll_directory(data_dir)
+                    return abs_path
+        # Fallback to original
+        result = _original_find_library(name)
+        # Ensure result is absolute path if it exists
+        if result and not os.path.isabs(result):
+            # Try to find it as a file
+            if os.path.isfile(result):
+                return os.path.abspath(result)
+        return result
+    
+    ctypes.util.find_library = _patched_find_library
+    
+    # Pre-load libmpv DLL with proper dependency search
+    for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+        dll_path = os.path.join(runtime_dir, dll_name)
+        if os.path.isfile(dll_path):
+            _set_dll_directory(runtime_dir)
+            loaded = _load_dll_safe(dll_path)
+            if loaded:
+                _WIN_DLL_HANDLES.append(loaded)
+                break
 
 # Try importing mpv multiple times with aggressive path setup
 HAS_MPV = False
@@ -424,6 +521,7 @@ for _attempt in range(3):
             # Retry: re-setup paths, copy deps again
             rt = _copy_mpv_dll_to_runtime_dir()
             if rt:
+                _set_dll_directory(rt)
                 _add_windows_dll_directory(rt)
                 _prepend_to_path(rt)
             time.sleep(0.2)
@@ -446,32 +544,67 @@ def _diagnose_mpv_availability():
         info.append("=== MPV Diagnostyka ===")
         
         # Check what find_library returns
-        for name in ("mpv-2.dll", "libmpv-2.dll", "mpv-1.dll"):
-            found = ctypes.util.find_library(name.replace(".dll", ""))
+        for name in ("mpv-2", "libmpv-2", "mpv-1", "libmpv", "mpv"):
+            found = ctypes.util.find_library(name)
             if found:
                 info.append(f"find_library({name}): {found}")
-            else:
-                info.append(f"find_library({name}): nie znaleziono")
         
         # Check runtime dir
         runtime_dir = _get_flipper_mpv_dir()
         info.append(f"Runtime dir: {runtime_dir}")
         
+        # Set DLL directory before trying to load
+        _set_dll_directory(runtime_dir)
+        _add_windows_dll_directory(runtime_dir)
+        _prepend_to_path(runtime_dir)
+        
         # Check for main DLL files
-        for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+        for dll_name in ("libmpv-2.dll", "libmpv.dll", "mpv-2.dll", "mpv.dll"):
             dll_path = os.path.join(runtime_dir, dll_name)
             if os.path.exists(dll_path):
                 size = os.path.getsize(dll_path)
                 info.append(f"✓ {dll_name}: {size:,} bytes")
-                # Try to load with winmode=0
-                try:
-                    if sys.version_info >= (3, 8):
+                # Try multiple loading methods
+                loaded = False
+                errors = []
+                
+                # Method 1: winmode=0
+                if sys.version_info >= (3, 8):
+                    try:
                         ctypes.CDLL(dll_path, winmode=0)
-                    else:
+                        info.append(f"  → winmode=0: OK ✓")
+                        loaded = True
+                    except Exception as e:
+                        errors.append(f"winmode=0: {e}")
+                
+                # Method 2: Standard CDLL
+                if not loaded:
+                    try:
                         ctypes.CDLL(dll_path)
-                    info.append(f"  → ładowalny ✓")
-                except Exception as e:
-                    info.append(f"  → NIE ładowalny: {e}")
+                        info.append(f"  → CDLL: OK ✓")
+                        loaded = True
+                    except Exception as e:
+                        errors.append(f"CDLL: {e}")
+                
+                # Method 3: LoadLibraryExW
+                if not loaded:
+                    try:
+                        LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+                        kernel32 = ctypes.windll.kernel32
+                        handle = kernel32.LoadLibraryExW(dll_path, None, LOAD_WITH_ALTERED_SEARCH_PATH)
+                        if handle:
+                            info.append(f"  → LoadLibraryExW: OK ✓")
+                            loaded = True
+                        else:
+                            err = ctypes.get_last_error()
+                            errors.append(f"LoadLibraryExW: error {err}")
+                    except Exception as e:
+                        errors.append(f"LoadLibraryExW exception: {e}")
+                
+                if not loaded and errors:
+                    info.append(f"  → NIE ładowalny:")
+                    for err in errors:
+                        info.append(f"    {err}")
             else:
                 info.append(f"✗ {dll_name}: nie znaleziono")
         
