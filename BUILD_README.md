@@ -44,8 +44,8 @@ Output: `dist/Flipper.exe`
 # Install PyInstaller
 pip install pyinstaller
 
-# Build with obfuscation
-pyinstaller --name="Flipper" --windowed --onefile --clean --optimize 2 Flipper.spec
+# Build
+pyinstaller --name="Flipper" --windowed --onefile --clean --optimize 2 --disable-windowed-traceback main.py
 ```
 
 ## 🔒 Security & Obfuscation

@@ -119,15 +119,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[Environment]::GetEnv
 
 REM ── Step 5: Build EXE ──────────────────────────────────
 echo.
-echo [5/6] Building executable with obfuscation...
+echo [5/6] Building executable...
 
-REM Compile scanner.py to Cython for obfuscation
-echo     Compiling scanner.py with Cython...
-cmd /c %PY% -m cython scanner.py --embed-pos-in-docstring 2>nul
-
-REM Build with optimizations and obfuscation
+REM NOTE: When a .spec file is provided, PyInstaller forbids many CLI options
+REM (onefile/onedir/name/optimize/windowed/console etc.).
+REM Build from main.py so we can pass options safely.
 echo     Packaging with PyInstaller...
-cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 Flipper.spec
+cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 --disable-windowed-traceback main.py
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 
