@@ -839,6 +839,7 @@ class App:
         self.mpv_player = None
         self.current_tab = 0
         self.current_stream_url = None
+        self._tree_item_to_channel = {}
 
         # Navigation stack
         self.nav_stack = []
@@ -2644,11 +2645,10 @@ class App:
         sel = self.channel_tree.selection()
         if not sel:
             return
-        idx = self.channel_tree.index(sel[0])
-        if idx >= len(self.player_channels):
+        item_id = sel[0]
+        ch = self._get_channel_for_tree_item(item_id)
+        if ch is None:
             return
-
-        ch = self.player_channels[idx]
 
         if ch.get("cmd"):
             self._play_channel_entry(ch)
@@ -2664,6 +2664,8 @@ class App:
             })
             self._update_nav_ui()
             self._fetch_genre_channels(str(genre_id))
+        else:
+            self._log(f"Element '{genre_name}' nie ma strumienia ani kategorii.", "warning")
 
     # ══════════════════════════════════════════════════════
     #  CHANNEL SEARCH / FILTER / SORT
@@ -2673,6 +2675,7 @@ class App:
         query = self.channel_search_var.get().strip().lower()
         for item in self.channel_tree.get_children():
             self.channel_tree.delete(item)
+        self._tree_item_to_channel = {}
         count = 0
         for ch in self.player_channels:
             num = ch.get("number", ch.get("id", ""))
@@ -2681,6 +2684,7 @@ class App:
                     and query not in str(num).lower():
                 continue
             self.channel_tree.insert("", tk.END, values=(num, name))
+            self._tree_item_to_channel[self.channel_tree.get_children()[-1]] = ch
             count += 1
         self.channel_count_label.configure(text=f"Kanały: {count}")
 
@@ -2873,6 +2877,7 @@ class App:
         query = self.channel_search_var.get().strip().lower()
         for item in self.channel_tree.get_children():
             self.channel_tree.delete(item)
+        self._tree_item_to_channel = {}
         count = 0
         for ch in self.player_channels:
             num = ch.get("number", ch.get("id", ""))
@@ -2881,8 +2886,14 @@ class App:
                     and query not in str(num).lower():
                 continue
             self.channel_tree.insert("", tk.END, values=(num, name))
+            self._tree_item_to_channel[self.channel_tree.get_children()[-1]] = ch
             count += 1
         self.channel_count_label.configure(text=f"Kanały: {count}")
+
+    def _get_channel_for_tree_item(self, item_id):
+        """Get channel dict for a tree item, works even when filtered."""
+        mapping = getattr(self, '_tree_item_to_channel', {})
+        return mapping.get(item_id)
 
     # ══════════════════════════════════════════════════════
     #  ACCOUNT INFO (Info tab)
@@ -3019,11 +3030,37 @@ class App:
                 input_default_bindings=True,
                 input_vo_keyboard=True,
                 osc=True,
+                log_handler=self._mpv_log_handler,
+                loglevel='info',
             )
             self.mpv_player.volume = self.volume_scale.get()
+            self._log(f"mpv zainicjalizowany (vo={vo}, wid={wid}).", "success")
         except Exception as e:
-            self._log(f"Błąd inicjalizacji mpv: {e}", "error")
-            self.mpv_player = None
+            self._log(f"Błąd inicjalizacji mpv (vo={vo}): {e}", "error")
+            # Fallback: try without wid embedding
+            try:
+                self.mpv_player = mpv.MPV(
+                    input_default_bindings=True,
+                    input_vo_keyboard=True,
+                    osc=True,
+                    log_handler=self._mpv_log_handler,
+                    loglevel='info',
+                )
+                self.mpv_player.volume = self.volume_scale.get()
+                self._log("mpv zainicjalizowany (tryb okienkowy).", "success")
+            except Exception as e2:
+                self._log(f"Błąd inicjalizacji mpv (fallback): {e2}", "error")
+                self.mpv_player = None
+
+    def _mpv_log_handler(self, loglevel, component, message):
+        """Capture mpv internal log messages."""
+        try:
+            if loglevel in ('error', 'fatal'):
+                self._log_safe(f"mpv [{component}]: {message}", "error")
+            elif loglevel == 'warn':
+                self._log_safe(f"mpv [{component}]: {message}", "warning")
+        except Exception:
+            pass
 
     def _ensure_mpv(self):
         """Lazy-init mpv when first needed (needs visible window)."""
@@ -3037,10 +3074,11 @@ class App:
         if not self._ensure_mpv():
             return False
         try:
+            self._log(f"mpv.play({stream_url[:80]}...)", "info")
             self.mpv_player.play(stream_url)
             return True
         except Exception as e:
-            self._log_safe(f"mpv error: {e}", "error")
+            self._log_safe(f"mpv play error: {e}", "error")
             return False
 
     def _player_play_pause(self):
@@ -3117,10 +3155,10 @@ class App:
         if not sel:
             self._log("Zaznacz kanał do odtworzenia.", "warning")
             return
-        idx = self.channel_tree.index(sel[0])
-        if idx >= len(self.player_channels):
+        ch = self._get_channel_for_tree_item(sel[0])
+        if ch is None:
+            self._log("Nie znaleziono kanału.", "error")
             return
-        ch = self.player_channels[idx]
         self._play_channel_entry(ch)
 
     def _play_channel_entry(self, ch):
@@ -3139,37 +3177,53 @@ class App:
                          args=(cmd, name), daemon=True).start()
 
     def _play_stream_worker(self, cmd, name):
-        mac, url_raw, proxy = self._get_player_mac_url_proxy()
-        if not mac or not url_raw:
-            self._log_safe("Brak MAC/URL. Wybierz profil.", "error")
-            return
+        try:
+            mac, url_raw, proxy = self._get_player_mac_url_proxy()
+            if not mac or not url_raw:
+                self._log_safe("Brak MAC/URL. Wybierz profil.", "error")
+                return
 
-        timeout = self._get_timeout()
-        url = parse_url(url_raw)
+            timeout = self._get_timeout()
+            url = parse_url(url_raw)
 
-        if not self.player_token:
-            self.player_token, _ = get_handshake(
-                url, mac, timeout=timeout, proxy=proxy)
-        if not self.player_token:
-            self._log_safe("Nie udało się uzyskać tokena.", "error")
+            if not self.player_token:
+                self._log_safe("Brak tokena, wykonuję handshake...", "info")
+                self.player_token, _ = get_handshake(
+                    url, mac, timeout=timeout, proxy=proxy)
+            if not self.player_token:
+                self._log_safe("Nie udało się uzyskać tokena.", "error")
+                self._set_progress(100, "Błąd")
+                return
+
+            self._log_safe(f"Pobieranie URL streamu (cmd={cmd[:60]})...", "info")
+            stream_url = get_stream_url(
+                url, mac, self.player_token, cmd,
+                content_type=self.player_content_type,
+                timeout=timeout, proxy=proxy)
+            if not stream_url:
+                # Token might have expired, retry with fresh handshake
+                self._log_safe("Brak URL — próba z nowym tokenem...", "warning")
+                self.player_token, _ = get_handshake(
+                    url, mac, timeout=timeout, proxy=proxy)
+                if self.player_token:
+                    stream_url = get_stream_url(
+                        url, mac, self.player_token, cmd,
+                        content_type=self.player_content_type,
+                        timeout=timeout, proxy=proxy)
+            if not stream_url:
+                self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
+                self._set_progress(100, "Błąd")
+                return
+
+            self._log_safe(f"Stream: {stream_url}", "success")
+            self._set_progress(100, f"▶ {name}")
+            self.current_stream_url = stream_url
+
+            # Play in embedded mpv on UI thread
+            self.root.after(0, self._play_stream_on_ui, stream_url)
+        except Exception as e:
+            self._log_safe(f"Błąd odtwarzania: {e}", "error")
             self._set_progress(100, "Błąd")
-            return
-
-        stream_url = get_stream_url(
-            url, mac, self.player_token, cmd,
-            content_type=self.player_content_type,
-            timeout=timeout, proxy=proxy)
-        if not stream_url:
-            self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
-            self._set_progress(100, "Błąd")
-            return
-
-        self._log_safe(f"Stream: {stream_url}", "success")
-        self._set_progress(100, f"▶ {name}")
-        self.current_stream_url = stream_url
-
-        # Play in embedded mpv on UI thread
-        self.root.after(0, self._play_stream_on_ui, stream_url)
 
     def _play_stream_on_ui(self, stream_url):
         ok = self._mpv_play_url(stream_url)
@@ -3177,20 +3231,56 @@ class App:
             self._log("Odtwarzanie w wbudowanym mpv.", "success")
         else:
             self._log(
-                "mpv niedostępny. Sprawdź libmpv-2.dll i python-mpv (Windows).",
-                "error")
+                "mpv niedostępny — próba otwarcia w zewnętrznym playerze...",
+                "warning")
+            self._open_stream_external(stream_url)
+
+    def _open_stream_external(self, stream_url):
+        """Fallback: open stream in external player (mpv/VLC/browser)."""
+        try:
+            # Try external mpv first
+            mpv_exe = shutil.which("mpv")
+            if mpv_exe:
+                subprocess.Popen([mpv_exe, stream_url],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                self._log("Otwarto w zewnętrznym mpv.", "success")
+                return
+            # Try VLC
+            vlc_exe = shutil.which("vlc")
+            if not vlc_exe and sys.platform == "win32":
+                for p in (os.environ.get("ProgramFiles", ""),
+                          os.environ.get("ProgramFiles(x86)", "")):
+                    c = os.path.join(p, "VideoLAN", "VLC", "vlc.exe")
+                    if os.path.isfile(c):
+                        vlc_exe = c
+                        break
+            if vlc_exe:
+                subprocess.Popen([vlc_exe, stream_url],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                self._log("Otwarto w VLC.", "success")
+                return
+            # Last resort: copy to clipboard
+            self.root.clipboard_clear()
+            self.root.clipboard_append(stream_url)
+            self._log(
+                f"Brak zewnętrznego playera. URL skopiowany do schowka.",
+                "warning")
+        except Exception as e:
+            self._log(f"Błąd otwierania zewnętrznego playera: {e}", "error")
 
     def _copy_channel_url(self):
         sel = self.channel_tree.selection()
         if not sel:
             self._log("Zaznacz kanał.", "warning")
             return
-        idx = self.channel_tree.index(sel[0])
-        if idx >= len(self.player_channels):
+        ch = self._get_channel_for_tree_item(sel[0])
+        if ch is None:
+            self._log("Nie znaleziono kanału.", "error")
             return
-        ch = self.player_channels[idx]
         cmd = ch.get("cmd", "")
-        name = ch.get("name", "?")
+        name = ch.get("name", ch.get("title", "?"))
         if not cmd:
             self._log(f"Brak strumienia: {name}", "error")
             return
