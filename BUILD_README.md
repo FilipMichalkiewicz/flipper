@@ -44,8 +44,34 @@ Output: `dist/Flipper.exe`
 # Install PyInstaller
 pip install pyinstaller
 
-# Build
-pyinstaller --name="Flipper" --windowed --onefile --clean main.py
+# Build with obfuscation
+pyinstaller --name="Flipper" --windowed --onefile --clean --optimize 2 Flipper.spec
+```
+
+## 🔒 Security & Obfuscation
+
+The build process includes **code obfuscation** to protect intellectual property:
+
+- **Bytecode Optimization** (`optimize=2`) - Makes decompilation difficult
+- **Binary Stripping** - Removes debug symbols and source paths
+- **UPX Compression** - Compresses executable to prevent static analysis
+- **Cython Compilation** - Key modules compiled to native code
+- **No Traceback** - Error dialogs don't leak source code paths
+
+See [BUILD_OBFUSCATION.md](BUILD_OBFUSCATION.md) for full details.
+
+### Cleanup
+To remove old build artifacts before rebuilding:
+
+**Windows:**
+```batch
+cleanup_build.bat
+```
+
+**macOS/Linux:**
+```bash
+chmod +x cleanup_build.sh
+./cleanup_build.sh
 ```
 
 ## 📖 Usage

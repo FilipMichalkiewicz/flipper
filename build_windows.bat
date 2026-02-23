@@ -50,8 +50,8 @@ echo.
 echo [1/6] Installing dependencies...
 cmd /c %PY% -m pip install -r "%SCRIPT_DIR%\requirements.txt"
 echo     requirements.txt done (rc=%errorlevel%)
-cmd /c %PY% -m pip install pyinstaller py7zr
-echo     pyinstaller+py7zr done (rc=%errorlevel%)
+cmd /c %PY% -m pip install pyinstaller py7zr cython
+echo     pyinstaller+py7zr+cython done (rc=%errorlevel%)
 echo [1/6] Finished.
 
 REM ── Step 2: Ensure libmpv DLL ──────────────────────────
@@ -119,8 +119,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[Environment]::GetEnv
 
 REM ── Step 5: Build EXE ──────────────────────────────────
 echo.
-echo [5/6] Building executable...
-cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean main.py
+echo [5/6] Building executable with obfuscation...
+
+REM Compile scanner.py to Cython for obfuscation
+echo     Compiling scanner.py with Cython...
+cmd /c %PY% -m cython scanner.py --embed-pos-in-docstring 2>nul
+
+REM Build with optimizations and obfuscation
+echo     Packaging with PyInstaller...
+cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 Flipper.spec
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 
