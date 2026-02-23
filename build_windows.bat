@@ -153,7 +153,8 @@ if not errorlevel 1 (
 
 :try_py7zr
 echo     Trying py7zr...
-cmd /c %PY% -c "import py7zr,sys; a=py7zr.SevenZipFile(sys.argv[1],'r'); a.extractall(sys.argv[2]); a.close()" "%MPV_ARCHIVE%" "%MPV_EXTRACT_DIR%"
+REM Use -I flag to isolate Python from local imports and avoid loading libmpv-2.dll
+cmd /c %PY% -I -c "import py7zr,sys; a=py7zr.SevenZipFile(sys.argv[1],'r'); a.extractall(sys.argv[2]); a.close()" "%MPV_ARCHIVE%" "%MPV_EXTRACT_DIR%"
 if not errorlevel 1 (
     echo     Extracted with py7zr.
     exit /b 0
