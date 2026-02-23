@@ -245,11 +245,25 @@ def _ensure_mpv_runtime_windows():
 
 _ensure_mpv_runtime_windows()
 
-try:
-    import mpv
-    HAS_MPV = True
-except Exception:
-    HAS_MPV = False
+# Try importing mpv multiple times with aggressive path setup
+HAS_MPV = False
+MPV_IMPORT_ERROR = None
+
+for attempt in range(3):
+    try:
+        import mpv
+        HAS_MPV = True
+        break
+    except Exception as e:
+        MPV_IMPORT_ERROR = str(e)
+        if attempt < 2:
+            # Try one more time after ensuring runtime setup
+            if sys.platform == "win32":
+                runtime_dir = _copy_mpv_dll_to_runtime_dir()
+                if runtime_dir:
+                    _add_windows_dll_directory(runtime_dir)
+                    _prepend_to_path(runtime_dir)
+            time.sleep(0.1)
 
 from scanner import (
     generate_random_mac, check_mac, get_responding_endpoint, parse_url,
@@ -260,6 +274,40 @@ from scanner import (
     random_user_agent, _request_get, count_channels_quick,
 )
 from constants import RESULTS_FILE, SESSION_FILE
+
+def _diagnose_mpv_availability():
+    """Return diagnostic info about mpv availability"""
+    info = []
+    if sys.platform == "win32":
+        info.append("=== MPV Diagnostyka ===")
+        
+        # Check runtime dir
+        runtime_dir = _get_flipper_mpv_dir()
+        info.append(f"Runtime dir: {runtime_dir}")
+        
+        # Check for DLL files
+        for dll_name in ("libmpv-2.dll", "libmpv.dll"):
+            dll_path = os.path.join(runtime_dir, dll_name)
+            if os.path.exists(dll_path):
+                size = os.path.getsize(dll_path)
+                info.append(f"✓ {dll_name}: {size:,} bytes")
+                # Try to load
+                try:
+                    ctypes.CDLL(dll_path)
+                    info.append(f"  → ładowalny ✓")
+                except Exception as e:
+                    info.append(f"  → NIE ładowalny: {e}")
+            else:
+                info.append(f"✗ {dll_name}: nie znaleziono")
+        
+        # Check PATH
+        path_env = os.environ.get("PATH", "")
+        if runtime_dir in path_env:
+            info.append(f"✓ Runtime dir w PATH")
+        else:
+            info.append(f"✗ Runtime dir NIE W PATH")
+            
+    return "\n".join(info)
 
 MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
@@ -325,6 +373,15 @@ class App:
 
         self._setup_styles()
         self._build_gui()
+        
+        # Log MPV diagnostics on Windows
+        if sys.platform == "win32" and not HAS_MPV:
+            diag = _diagnose_mpv_availability()
+            for line in diag.split("\n"):
+                self._log(line, "dim")
+            if MPV_IMPORT_ERROR:
+                self._log(f"Import mpv error: {MPV_IMPORT_ERROR}", "error")
+        
         self._load_session()
         self._auto_fetch_proxies_on_startup()
 
@@ -882,12 +939,15 @@ class App:
         self.player_frame.pack(fill=tk.BOTH, expand=True)
 
         if not HAS_MPV:
+            error_text = "mpv niedostępny.\n"
+            if MPV_IMPORT_ERROR:
+                error_text += f"Błąd: {MPV_IMPORT_ERROR}\n\n"
+            error_text += ("Aplikacja próbuje instalacji automatycznej (winget).\n"
+                          "Jeśli nadal nie działa: zainstaluj mpv i python-mpv ręcznie.")
             tk.Label(self.player_frame,
-                     text="mpv niedostępny.\n"
-                         "Aplikacja próbuje instalacji automatycznej (winget).\n"
-                         "Jeśli nadal nie działa: zainstaluj mpv i python-mpv ręcznie.",
-                     font=("Helvetica", 14), bg="#000000", fg="#555577",
-                     justify=tk.CENTER).place(relx=0.5, rely=0.5,
+                     text=error_text,
+                     font=("Helvetica", 12), bg="#000000", fg="#555577",
+                     justify=tk.CENTER, wraplength=600).place(relx=0.5, rely=0.5,
                                               anchor=tk.CENTER)
 
         # Controls bar
@@ -2774,6 +2834,9 @@ class App:
                     f"[{last_code}] {time_tag} {mac}", "dim")
 
     def _scan_finished(self):
+        # Avoid duplicate reset if already stopped manually
+        if not self.is_running and not self.is_paused:
+            return
         self.is_running = False
         self.is_paused = False
         self._set_status("Zakończono", "#888888")
@@ -2816,6 +2879,11 @@ class App:
         self._log("⏹  Zatrzymywanie...", "warning")
         self.stop_event.set()
         self.pause_event.set()
+        # Immediately reset state and buttons
+        self.is_running = False
+        self.is_paused = False
+        self._set_status("Zatrzymano", "#888888")
+        self.root.after(0, self._reset_buttons)
 
     # ══════════════════════════════════════════════════════
     #  CLOSE
