@@ -128,12 +128,12 @@ echo     Preparing bundled mpv DLLs...
 set "ADD_BIN_ARGS="
 if exist "%MPV_EXTRACT_DIR%\*.dll" (
     for %%F in ("%MPV_EXTRACT_DIR%\*.dll") do (
-        set "ADD_BIN_ARGS=!ADD_BIN_ARGS! --add-binary \"%%~fF;mpv\""
+        set "ADD_BIN_ARGS=!ADD_BIN_ARGS! --add-binary=%%~fF;mpv"
     )
 )
 
 echo     Packaging with PyInstaller...
-cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 --disable-windowed-traceback !ADD_BIN_ARGS! main.py
+%PY% -m PyInstaller --name Flipper --windowed --onefile --clean --optimize 2 --disable-windowed-traceback !ADD_BIN_ARGS! main.py
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 
@@ -182,6 +182,18 @@ cmd /c %PY% -I -c "import py7zr,sys; a=py7zr.SevenZipFile(sys.argv[1],'r'); a.ex
 if not errorlevel 1 (
     echo     Extracted with py7zr.
     exit /b 0
+)
+
+:try_7zr_download
+echo     py7zr failed (BCJ2 not supported). Downloading 7zr.exe...
+set "SEVEN_ZR=%TEMP%\7zr.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile '%SEVEN_ZR%'"
+if exist "%SEVEN_ZR%" (
+    "%SEVEN_ZR%" x -y -o"%MPV_EXTRACT_DIR%" "%MPV_ARCHIVE%" >nul
+    if not errorlevel 1 (
+        echo     Extracted with 7zr.exe
+        exit /b 0
+    )
 )
 echo     WARNING: All extraction methods failed.
 exit /b 1
