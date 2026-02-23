@@ -37,13 +37,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def _get_flipper_data_dir() -> str:
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA")
-        if base:
-            path = os.path.join(base, "Flipper")
-            os.makedirs(path, exist_ok=True)
-            return path
-    path = os.path.join(str(Path.home()), ".flipper")
+    desktop = os.path.join(str(Path.home()), "Desktop")
+    path = os.path.join(desktop, "flipper-config")
     os.makedirs(path, exist_ok=True)
     return path
 

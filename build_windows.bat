@@ -8,7 +8,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-set "FLIPPER_DATA_DIR=%LOCALAPPDATA%\Flipper"
+set "FLIPPER_DATA_DIR=%USERPROFILE%\Desktop\flipper-config"
 set "MPV_EXTRACT_DIR=%FLIPPER_DATA_DIR%\mpv"
 set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
