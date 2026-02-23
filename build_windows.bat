@@ -124,8 +124,16 @@ echo [5/6] Building executable...
 REM NOTE: When a .spec file is provided, PyInstaller forbids many CLI options
 REM (onefile/onedir/name/optimize/windowed/console etc.).
 REM Build from main.py so we can pass options safely.
+echo     Preparing bundled mpv DLLs...
+set "ADD_BIN_ARGS="
+if exist "%MPV_EXTRACT_DIR%\*.dll" (
+    for %%F in ("%MPV_EXTRACT_DIR%\*.dll") do (
+        set "ADD_BIN_ARGS=!ADD_BIN_ARGS! --add-binary \"%%~fF;mpv\""
+    )
+)
+
 echo     Packaging with PyInstaller...
-cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 --disable-windowed-traceback main.py
+cmd /c %PY% -m PyInstaller --name "Flipper" --windowed --onefile --clean --optimize 2 --disable-windowed-traceback !ADD_BIN_ARGS! main.py
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 

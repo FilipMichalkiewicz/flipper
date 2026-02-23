@@ -257,6 +257,64 @@ def _load_dll_safe(dll_path: str) -> Optional[ctypes.CDLL]:
     return None
 
 
+def _process_expected_machine() -> Optional[int]:
+    """Return expected PE Machine value for current process on Windows."""
+    if sys.platform != "win32":
+        return None
+    # 0x8664 = AMD64, 0x14c = I386
+    try:
+        import struct as _struct
+
+        bits = _struct.calcsize("P") * 8
+        return 0x8664 if bits == 64 else 0x14C
+    except Exception:
+        return None
+
+
+def _pe_machine(dll_path: str) -> Optional[int]:
+    """Read PE Machine from a Windows DLL/EXE. Returns None if not PE."""
+    try:
+        with open(dll_path, "rb") as f:
+            mz = f.read(2)
+            if mz != b"MZ":
+                return None
+            f.seek(0x3C)
+            pe_off = int.from_bytes(f.read(4), "little", signed=False)
+            f.seek(pe_off)
+            sig = f.read(4)
+            if sig != b"PE\x00\x00":
+                return None
+            machine = int.from_bytes(f.read(2), "little", signed=False)
+            return machine
+    except Exception:
+        return None
+
+
+def _dll_matches_process_arch(dll_path: str) -> bool:
+    expected = _process_expected_machine()
+    if not expected:
+        return True
+    actual = _pe_machine(dll_path)
+    if actual is None:
+        return True
+    return actual == expected
+
+
+def _mark_bad_mpv_dll(dll_path: str, reason: str) -> None:
+    """Rename a bad mpv DLL so we don't keep trying to load it."""
+    try:
+        if not os.path.isfile(dll_path):
+            return
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = os.path.basename(dll_path)
+        bad_name = f"{base}.bad-{ts}"
+        bad_path = os.path.join(os.path.dirname(dll_path), bad_name)
+        os.replace(dll_path, bad_path)
+        _debug_print(f"[Flipper] Renamed bad mpv DLL: {dll_path} -> {bad_path} ({reason})")
+    except Exception:
+        pass
+
+
 def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
     """Copy libmpv-2.dll AND all its dependencies to runtime directory"""
     target_dir = _get_flipper_mpv_dir()
@@ -269,18 +327,26 @@ def _copy_mpv_dll_to_runtime_dir() -> Optional[str]:
     for dll_name in ("libmpv-2.dll", "libmpv.dll"):
         # Prefer stable sources first; _MEIPASS only as last-resort fallback.
         candidate_paths = []
-        candidate_paths.append(os.path.join(target_dir, dll_name))
-        candidate_paths.append(
-            os.path.join(_get_flipper_data_dir(), dll_name)
-        )
-        candidate_paths.append(os.path.join(os.path.dirname(__file__), dll_name))
-
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
+            # If bundled, prefer bundled mpv directory first
+            candidate_paths.append(os.path.join(meipass, "mpv", dll_name))
             candidate_paths.append(os.path.join(meipass, dll_name))
+
+        candidate_paths.append(os.path.join(target_dir, dll_name))
+        candidate_paths.append(os.path.join(_get_flipper_data_dir(), dll_name))
+        candidate_paths.append(os.path.join(os.path.dirname(__file__), dll_name))
 
         for src in candidate_paths:
             if not os.path.isfile(src):
+                continue
+
+            # Architecture guard: WinError 193 is almost always 32/64-bit mismatch
+            if sys.platform == "win32" and not _dll_matches_process_arch(src):
+                _debug_print(f"[Flipper] libmpv candidate has wrong arch: {src}")
+                # If the user put wrong DLL into runtime dir, rename it so we stop picking it up.
+                if os.path.abspath(os.path.dirname(src)) == os.path.abspath(target_dir):
+                    _mark_bad_mpv_dll(src, "arch-mismatch")
                 continue
             
             # Found libmpv DLL - copy it AND all other DLLs from same directory
@@ -603,6 +669,10 @@ def _diagnose_mpv_availability():
         info.append("=== MPV Diagnostyka ===")
         info.append(f"Python: {sys.version.split()[0]} ({platform.architecture()[0]})")
         info.append(f"Executable: {sys.executable}")
+        expected = _process_expected_machine()
+        if expected:
+            exp_label = "x64" if expected == 0x8664 else "x86"
+            info.append(f"Expected DLL arch: {exp_label} (PE Machine=0x{expected:04x})")
 
         # python-mpv package info (best-effort)
         try:
@@ -636,7 +706,11 @@ def _diagnose_mpv_availability():
             dll_path = os.path.join(runtime_dir, dll_name)
             if os.path.exists(dll_path):
                 size = os.path.getsize(dll_path)
-                info.append(f"✓ {dll_name}: {size:,} bytes")
+                mach = _pe_machine(dll_path)
+                if mach:
+                    info.append(f"✓ {dll_name}: {size:,} bytes (PE Machine=0x{mach:04x})")
+                else:
+                    info.append(f"✓ {dll_name}: {size:,} bytes")
                 # Try multiple loading methods
                 loaded = False
                 errors = []
