@@ -13,10 +13,68 @@ import platform
 import shutil
 import subprocess
 import ctypes
+import traceback
 from pathlib import Path
 from typing import Optional
 
 _WIN_DLL_HANDLES = []
+
+# Debug console mode (Windows): can be enabled from Settings (persists in session.json)
+# or via env var FLIPPER_DEBUG=1.
+_EARLY_DEBUG_ENABLED = False
+_DEBUG_CONSOLE_ENABLED = False
+
+
+def _read_debug_console_flag() -> bool:
+    env = os.environ.get("FLIPPER_DEBUG", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    try:
+        import json as _json
+
+        desktop = os.path.join(str(Path.home()), "Desktop")
+        data_dir = os.path.join(desktop, "flipper-config")
+        session_path = os.path.join(data_dir, "session.json")
+        if os.path.isfile(session_path):
+            with open(session_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            return bool(data.get("debug_console", False))
+    except Exception:
+        return False
+    return False
+
+
+def _enable_windows_console() -> None:
+    """Allocate a Windows console and redirect stdout/stderr to it."""
+    global _DEBUG_CONSOLE_ENABLED
+    if sys.platform != "win32" or _DEBUG_CONSOLE_ENABLED:
+        return
+    try:
+        ctypes.windll.kernel32.AllocConsole()
+    except Exception:
+        # If already attached or not allowed, continue best-effort.
+        pass
+    try:
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    _DEBUG_CONSOLE_ENABLED = True
+
+
+def _debug_print(msg: str) -> None:
+    if not (_EARLY_DEBUG_ENABLED or _DEBUG_CONSOLE_ENABLED):
+        return
+    try:
+        print(msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+_EARLY_DEBUG_ENABLED = _read_debug_console_flag()
+if sys.platform == "win32" and _EARLY_DEBUG_ENABLED:
+    _enable_windows_console()
+    _debug_print("[Flipper] Debug console enabled (early).")
 
 # Suppress Windows "not a valid Win32 application" popup dialogs
 # MUST be done before ANY DLL loading attempt (ctypes, import mpv, etc.)
@@ -516,7 +574,8 @@ for _attempt in range(3):
         HAS_MPV = True
         break
     except Exception as e:
-        MPV_IMPORT_ERROR = str(e)
+        MPV_IMPORT_ERROR = traceback.format_exc()
+        _debug_print("[Flipper] import mpv failed (python-mpv):\n" + MPV_IMPORT_ERROR)
         if _attempt < 2 and sys.platform == "win32":
             # Retry: re-setup paths, copy deps again
             rt = _copy_mpv_dll_to_runtime_dir()
@@ -542,6 +601,20 @@ def _diagnose_mpv_availability():
     info = []
     if sys.platform == "win32":
         info.append("=== MPV Diagnostyka ===")
+        info.append(f"Python: {sys.version.split()[0]} ({platform.architecture()[0]})")
+        info.append(f"Executable: {sys.executable}")
+
+        # python-mpv package info (best-effort)
+        try:
+            import importlib.metadata as _im
+
+            try:
+                info.append(f"python-mpv version: {_im.version('python-mpv')}")
+            except Exception:
+                # some installs use 'mpv' distribution name
+                info.append(f"python-mpv version: {_im.version('mpv')}")
+        except Exception:
+            pass
         
         # Check what find_library returns
         for name in ("mpv-2", "libmpv-2", "mpv-1", "libmpv", "mpv"):
@@ -607,6 +680,18 @@ def _diagnose_mpv_availability():
                         info.append(f"    {err}")
             else:
                 info.append(f"✗ {dll_name}: nie znaleziono")
+
+        # Try importing mpv right here (shows exact import error)
+        try:
+            import mpv as _mpv
+
+            info.append("✓ import mpv: OK")
+            mod_path = getattr(_mpv, "__file__", None)
+            if mod_path:
+                info.append(f"mpv module file: {mod_path}")
+        except Exception:
+            info.append("✗ import mpv: FAIL")
+            info.append(traceback.format_exc())
         
         # Count and list other DLLs (dependencies)
         try:
@@ -689,6 +774,9 @@ class App:
 
         # Settings
         self.verbose_logs_var = tk.BooleanVar(value=False)
+        # Debug console: shows full exceptions/diagnostics in a Windows console
+        # Note: takes effect immediately for logging, but mpv import happens on startup.
+        self.debug_console_var = tk.BooleanVar(value=bool(_EARLY_DEBUG_ENABLED))
         self.use_proxy_var = tk.BooleanVar(value=True)
         self.player_use_proxy_var = tk.BooleanVar(value=True)
         self.min_channels = 0
@@ -700,6 +788,44 @@ class App:
 
         self._setup_styles()
         self._build_gui()
+
+        # If user enabled debug mode, allocate console (Windows) so logs go somewhere.
+        if sys.platform == "win32" and self.debug_console_var.get():
+            _enable_windows_console()
+            _debug_print("[Flipper] Debug console enabled (App init).")
+
+            # Show full tracebacks from Tkinter callbacks in console
+            def _tk_report_callback_exception(exc, val, tb):
+                try:
+                    formatted = "".join(traceback.format_exception(exc, val, tb))
+                    _debug_print("[Flipper] Tkinter callback exception:\n" + formatted)
+                except Exception:
+                    pass
+
+            try:
+                self.root.report_callback_exception = _tk_report_callback_exception
+            except Exception:
+                pass
+
+            # Python 3.8+: show exceptions from threads
+            try:
+                import threading as _threading
+
+                if hasattr(_threading, "excepthook"):
+                    def _thread_excepthook(args):
+                        try:
+                            formatted = "".join(
+                                traceback.format_exception(
+                                    args.exc_type, args.exc_value, args.exc_traceback
+                                )
+                            )
+                            _debug_print("[Flipper] Thread exception:\n" + formatted)
+                        except Exception:
+                            pass
+
+                    _threading.excepthook = _thread_excepthook
+            except Exception:
+                pass
         
         # Log MPV diagnostics on Windows
         if sys.platform == "win32" and not HAS_MPV:
@@ -1442,6 +1568,35 @@ class App:
                  wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(2, 0))
 
+        # Debug console checkbox
+        dbg_frame = tk.Frame(page, bg=BG_DARK)
+        dbg_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        tk.Checkbutton(
+            dbg_frame,
+            text="Tryb debug (konsola) — pokazuj wyjątki mpv/DLL w konsoli",
+            variable=self.debug_console_var,
+            command=self._on_debug_console_toggle,
+            bg=BG_DARK,
+            fg="#d0d0e8",
+            selectcolor=BG_INPUT,
+            activebackground=BG_DARK,
+            activeforeground="#ffffff",
+            font=("Helvetica", 12),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            dbg_frame,
+            text=(
+                "Windows: otwiera okno konsoli i wypisuje pełne tracebacks. "
+                "Włączenie może wymagać restartu, żeby złapać błędy importu mpv."
+            ),
+            font=("Helvetica", 10),
+            bg=BG_DARK,
+            fg=FG_DIM,
+            wraplength=750,
+            anchor=tk.W,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+
         self._sep_dark(page)
 
         # Use proxy checkbox
@@ -1666,6 +1821,32 @@ class App:
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
+        # Optional console output (debug mode)
+        if sys.platform == "win32" and (self.debug_console_var.get() or _DEBUG_CONSOLE_ENABLED):
+            try:
+                print(full_msg, flush=True)
+            except Exception:
+                pass
+
+    def _on_debug_console_toggle(self):
+        enabled = bool(self.debug_console_var.get())
+        if sys.platform == "win32" and enabled:
+            _enable_windows_console()
+            _debug_print("[Flipper] Debug console enabled from Settings.")
+        self._log(f"Debug (konsola): {'ON' if enabled else 'OFF'}", "warning")
+        if enabled and sys.platform == "win32" and not HAS_MPV:
+            # Re-run diagnostics into UI log (and console, because debug is enabled)
+            try:
+                diag = _diagnose_mpv_availability()
+                for line in diag.split("\n"):
+                    self._log(line, "dim")
+                if MPV_IMPORT_ERROR:
+                    self._log("Import mpv error (traceback):", "error")
+                    for line in str(MPV_IMPORT_ERROR).split("\n"):
+                        self._log(line, "error")
+            except Exception:
+                self._log("Nie udało się uruchomić diagnostyki MPV.", "error")
+
     def _log_safe(self, message, tag="info"):
         self.root.after(0, self._log, message, tag)
 
@@ -1859,6 +2040,7 @@ class App:
             "checked_count": self.checked_count,
             "found_count": self.found_count,
             "verbose_logs": self.verbose_logs_var.get(),
+            "debug_console": self.debug_console_var.get(),
             "save_folder": self.save_folder,
             "use_proxy": self.use_proxy_var.get(),
             "player_use_proxy": self.player_use_proxy_var.get(),
@@ -1941,6 +2123,10 @@ class App:
 
         if "verbose_logs" in data:
             self.verbose_logs_var.set(data["verbose_logs"])
+        if "debug_console" in data:
+            self.debug_console_var.set(bool(data["debug_console"]))
+            if sys.platform == "win32" and self.debug_console_var.get():
+                _enable_windows_console()
         if "use_proxy" in data:
             self.use_proxy_var.set(data["use_proxy"])
         if "player_use_proxy" in data:
