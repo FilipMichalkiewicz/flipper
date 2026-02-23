@@ -116,6 +116,15 @@ def _migrate_legacy_flipper_data(legacy_path: str, new_path: str) -> None:
     except Exception:
         pass
 
+    # After migration, DELETE libmpv from legacy to prevent find_library from finding it there
+    try:
+        for name in ("libmpv-2.dll", "libmpv.dll", "mpv-2.dll", "mpv-1.dll"):
+            legacy_dll = os.path.join(src_dir, name)
+            if os.path.isfile(legacy_dll):
+                os.remove(legacy_dll)
+    except Exception:
+        pass
+
 
 def _get_flipper_mpv_dir() -> str:
     path = os.path.join(_get_flipper_data_dir(), "mpv")
@@ -381,6 +390,24 @@ if sys.platform == "win32":
     data_dir = _get_flipper_data_dir()
     _add_windows_dll_directory(data_dir)
     _prepend_to_path(data_dir)
+    
+    # IMPORTANT: Remove legacy LOCALAPPDATA\Flipper paths from PATH
+    # to prevent ctypes.util.find_library from finding DLLs there
+    try:
+        legacy_base = os.environ.get("LOCALAPPDATA", "")
+        if legacy_base:
+            legacy_paths = [
+                os.path.join(legacy_base, "Flipper", "mpv"),
+                os.path.join(legacy_base, "Flipper"),
+            ]
+            current_path = os.environ.get("PATH", "")
+            path_parts = current_path.split(os.pathsep)
+            # Filter out legacy paths (case-insensitive on Windows)
+            filtered = [p for p in path_parts 
+                       if p.lower() not in {lp.lower() for lp in legacy_paths}]
+            os.environ["PATH"] = os.pathsep.join(filtered)
+    except Exception:
+        pass
 
 # Try importing mpv multiple times with aggressive path setup
 HAS_MPV = False
@@ -413,9 +440,18 @@ from constants import RESULTS_FILE, SESSION_FILE
 
 def _diagnose_mpv_availability():
     """Return diagnostic info about mpv availability"""
+    import ctypes.util
     info = []
     if sys.platform == "win32":
         info.append("=== MPV Diagnostyka ===")
+        
+        # Check what find_library returns
+        for name in ("mpv-2.dll", "libmpv-2.dll", "mpv-1.dll"):
+            found = ctypes.util.find_library(name.replace(".dll", ""))
+            if found:
+                info.append(f"find_library({name}): {found}")
+            else:
+                info.append(f"find_library({name}): nie znaleziono")
         
         # Check runtime dir
         runtime_dir = _get_flipper_mpv_dir()
@@ -427,9 +463,12 @@ def _diagnose_mpv_availability():
             if os.path.exists(dll_path):
                 size = os.path.getsize(dll_path)
                 info.append(f"✓ {dll_name}: {size:,} bytes")
-                # Try to load
+                # Try to load with winmode=0
                 try:
-                    ctypes.CDLL(dll_path)
+                    if sys.version_info >= (3, 8):
+                        ctypes.CDLL(dll_path, winmode=0)
+                    else:
+                        ctypes.CDLL(dll_path)
                     info.append(f"  → ładowalny ✓")
                 except Exception as e:
                     info.append(f"  → NIE ładowalny: {e}")
@@ -455,12 +494,12 @@ def _diagnose_mpv_availability():
         except Exception:
             pass
         
-        # Check PATH
+        # Check PATH (first 3 entries)
         path_env = os.environ.get("PATH", "")
-        if runtime_dir in path_env:
-            info.append(f"✓ Runtime dir w PATH")
-        else:
-            info.append(f"✗ Runtime dir NIE W PATH")
+        path_parts = path_env.split(os.pathsep)[:5]
+        info.append(f"PATH (pierwsze 5):")
+        for p in path_parts:
+            info.append(f"  {p}")
             
     return "\n".join(info)
 
