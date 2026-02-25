@@ -2539,18 +2539,30 @@ class App:
         # 4. CWD
         session_paths.append(SESSION_FILE)
 
+        # Find the best session: prefer one that has active_macs data.
         session_path = None
+        data = None
         for path in session_paths:
-            if os.path.exists(path):
-                session_path = path
-                break
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    candidate = json.load(f)
+                if data is None:
+                    # Use first valid session as baseline
+                    session_path = path
+                    data = candidate
+                # If baseline has no MACs but this one does, upgrade to this one
+                if not data.get("active_macs") and candidate.get("active_macs"):
+                    session_path = path
+                    data = candidate
+                    break  # found one with MACs, use it
+            except Exception:
+                continue
 
-        if not session_path:
-            return
-        try:
-            with open(session_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+        if not data:
+            # Try loading MACs from results.txt as last resort
+            self._load_macs_from_results()
             return
 
         for key, widget in [("url", self.url_entry),
@@ -2652,6 +2664,64 @@ class App:
         if hasattr(self, 'save_folder_entry'):
             self.save_folder_entry.delete(0, tk.END)
             self.save_folder_entry.insert(0, self.save_folder)
+
+        # If session had no MACs, try to recover from results.txt
+        if not self.active_macs:
+            self._load_macs_from_results()
+
+    def _load_macs_from_results(self):
+        """Try to import MACs from results.txt files in known locations."""
+        import re
+        results_paths = []
+        canonical = _get_flipper_data_dir()
+        results_paths.append(os.path.join(canonical, RESULTS_FILE))
+        if self.save_folder and os.path.normpath(self.save_folder) != os.path.normpath(canonical):
+            results_paths.append(os.path.join(self.save_folder, RESULTS_FILE))
+        legacy = os.path.join(str(Path.home()), "Desktop", "flipper-config", RESULTS_FILE)
+        if legacy not in results_paths:
+            results_paths.append(legacy)
+        results_paths.append(RESULTS_FILE)
+
+        for rpath in results_paths:
+            if not os.path.isfile(rpath):
+                continue
+            try:
+                with open(rpath, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                count = 0
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Format: MAC | expiry | url | ch=N | proxy
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) >= 3:
+                        mac = parts[0]
+                        expiry = parts[1]
+                        url = parts[2]
+                        channels = "?"
+                        proxy = ""
+                        for p in parts[3:]:
+                            if p.startswith("ch="):
+                                channels = p[3:]
+                            elif p:
+                                proxy = p
+                        entry = {
+                            "mac": mac, "expiry": expiry,
+                            "url": url, "channels": channels,
+                            "proxy": proxy,
+                        }
+                        # Avoid duplicates
+                        if not any(m["mac"] == mac and m["url"] == url
+                                   for m in self.active_macs):
+                            self.active_macs.append(entry)
+                            self._insert_mac_row(entry)
+                            count += 1
+                if count > 0:
+                    self._log(f"Odzyskano {count} MAC z {rpath}", "success")
+                    return  # stop after first successful file
+            except Exception:
+                continue
 
     # ══════════════════════════════════════════════════════
     #  PROXY TAB LOGIC
