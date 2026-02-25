@@ -14,20 +14,33 @@ set "MPV_DLL=%MPV_EXTRACT_DIR%\libmpv-2.dll"
 set "DIST_EXE=%SCRIPT_DIR%\dist\Flipper.exe"
 set "DESKTOP_DIR="
 set "PY="
+set "PY_FALLBACK="
 set "MPV_ARCH=x86_64"
 
-REM ── Detect Python ──────────────────────────────────────
+REM ── Detect Python with tkinter support ─────────────────
 where python >nul 2>nul
-if not errorlevel 1 (
-    set "PY=python"
-    goto :py_ok
-)
+if not errorlevel 1 set "PY_FALLBACK=python"
+
 where py >nul 2>nul
 if not errorlevel 1 (
-    set "PY=py -3"
-    goto :py_ok
+    if not defined PY_FALLBACK (
+        set "PY_FALLBACK=py -3"
+    )
 )
-echo ERROR: Python not found in PATH.
+
+if not defined PY_FALLBACK (
+    echo ERROR: Python not found in PATH.
+    goto :fail
+)
+
+call :try_python_with_tk "python"
+if defined PY goto :py_ok
+
+call :try_python_with_tk "py -3"
+if defined PY goto :py_ok
+
+echo ERROR: Found Python, but tkinter is missing in all detected interpreters.
+echo        Install full Python from python.org (with Tcl/Tk), then retry build.
 goto :fail
 
 :py_ok
@@ -133,7 +146,7 @@ if exist "%MPV_EXTRACT_DIR%\*.dll" (
 )
 
 echo     Packaging with PyInstaller...
-%PY% -m PyInstaller --name Flipper --windowed --onefile --clean --optimize 2 --disable-windowed-traceback !ADD_BIN_ARGS! main.py
+%PY% -m PyInstaller --name Flipper --windowed --onefile --clean --optimize 2 --disable-windowed-traceback --hidden-import=tkinter --hidden-import=_tkinter --collect-submodules=tkinter !ADD_BIN_ARGS! main.py
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 
@@ -153,6 +166,22 @@ echo   BUILD COMPLETE: dist\Flipper.exe
 echo ════════════════════════════════════════
 pause
 goto :eof
+
+REM ══════════════════════════════════════════════════════════
+REM  SUBROUTINE: try_python_with_tk
+REM ══════════════════════════════════════════════════════════
+:try_python_with_tk
+set "CAND=%~1"
+if "%CAND%"=="" exit /b 0
+
+cmd /c %CAND% -I -c "import tkinter, _tkinter" >nul 2>nul
+if errorlevel 1 (
+    echo Skipping interpreter without tkinter: %CAND%
+    exit /b 0
+)
+
+set "PY=%CAND%"
+exit /b 0
 
 REM ══════════════════════════════════════════════════════════
 REM  SUBROUTINE: extract_mpv
