@@ -990,8 +990,6 @@ class App:
         self._proxy_latencies = {}     # {proxy_str: latency_float}
         self.min_channels = 0
         self.save_folder = _get_flipper_data_dir()
-        self.update_repo = DEFAULT_UPDATE_REPO
-        self.update_branch = DEFAULT_UPDATE_BRANCH
         self.github_token = ""
 
         # Account info
@@ -1909,25 +1907,13 @@ class App:
         form = tk.Frame(update_frame, bg=BG_DARK)
         form.pack(fill=tk.X, pady=(0, 4))
 
-        tk.Label(form, text="Repo:", font=("Helvetica", 11, "bold"),
-                 bg=BG_DARK, fg="#d0d0e8").grid(row=0, column=0, sticky="w")
-        self.update_repo_entry = tk.Entry(
-            form, font=("Helvetica", 11), width=38,
-            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
-            relief="flat", highlightthickness=1,
-            highlightcolor=ACCENT, highlightbackground="#333355")
-        self.update_repo_entry.grid(row=0, column=1, sticky="we", padx=(6, 12), ipady=2)
-        self.update_repo_entry.insert(0, self.update_repo)
-
-        tk.Label(form, text="Branch:", font=("Helvetica", 11, "bold"),
-                 bg=BG_DARK, fg="#d0d0e8").grid(row=0, column=2, sticky="w")
-        self.update_branch_entry = tk.Entry(
-            form, font=("Helvetica", 11), width=12,
-            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
-            relief="flat", highlightthickness=1,
-            highlightcolor=ACCENT, highlightbackground="#333355")
-        self.update_branch_entry.grid(row=0, column=3, sticky="we", padx=(6, 0), ipady=2)
-        self.update_branch_entry.insert(0, self.update_branch)
+        tk.Label(
+            form,
+            text=f"Źródło update: {DEFAULT_UPDATE_REPO} ({DEFAULT_UPDATE_BRANCH})",
+            font=("Helvetica", 10),
+            bg=BG_DARK,
+            fg=FG_DIM,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
 
         tk.Label(form, text="GitHub token:", font=("Helvetica", 11, "bold"),
                  bg=BG_DARK, fg="#d0d0e8").grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -1942,7 +1928,6 @@ class App:
             self.github_token_entry.insert(0, self.github_token)
 
         form.grid_columnconfigure(1, weight=1)
-        form.grid_columnconfigure(3, weight=0)
 
         self._make_btn(update_frame, "⬇️ Auto aktualizacja (GitHub)",
                        ACCENT, "#1d4ed8",
@@ -2008,13 +1993,8 @@ class App:
         if sys.platform != "win32":
             self._log("Auto aktualizacja jest dostępna tylko na Windows.", "warning")
             return
-        repo = (self.update_repo_entry.get().strip()
-                if hasattr(self, 'update_repo_entry') else self.update_repo)
         token = (self.github_token_entry.get().strip()
                  if hasattr(self, 'github_token_entry') else self.github_token)
-        if not repo or "/" not in repo:
-            self._log("Podaj repo w formacie owner/repo.", "error")
-            return
         if not token:
             self._log("To repo prywatne: podaj GitHub token (read-only).", "error")
             return
@@ -2023,15 +2003,7 @@ class App:
         threading.Thread(target=self._auto_update_worker, daemon=True).start()
 
     def _get_update_zip_url(self) -> str:
-        repo = (self.update_repo_entry.get().strip()
-                if hasattr(self, 'update_repo_entry') else self.update_repo)
-        branch = (self.update_branch_entry.get().strip()
-                  if hasattr(self, 'update_branch_entry') else self.update_branch)
-        if not branch:
-            branch = DEFAULT_UPDATE_BRANCH
-        self.update_repo = repo or DEFAULT_UPDATE_REPO
-        self.update_branch = branch
-        return f"https://api.github.com/repos/{self.update_repo}/zipball/{self.update_branch}"
+        return f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/zipball/{DEFAULT_UPDATE_BRANCH}"
 
     def _auto_update_worker(self):
         desktop = Path.home() / "Desktop"
@@ -2464,12 +2436,6 @@ class App:
             "player_use_proxy": self.player_use_proxy_var.get(),
             "min_channels": self.min_channels_entry.get(),
             "max_proxy_latency": self._get_max_latency(),
-            "update_repo": (self.update_repo_entry.get().strip()
-                             if hasattr(self, 'update_repo_entry')
-                             else self.update_repo),
-            "update_branch": (self.update_branch_entry.get().strip()
-                               if hasattr(self, 'update_branch_entry')
-                               else self.update_branch),
             "github_token_enc": _encrypt_secret(token_plain),
         }
         try:
@@ -2565,16 +2531,6 @@ class App:
             if hasattr(self, 'max_latency_entry'):
                 self.max_latency_entry.delete(0, tk.END)
                 self.max_latency_entry.insert(0, str(self.max_proxy_latency))
-        if "update_repo" in data:
-            self.update_repo = data.get("update_repo") or DEFAULT_UPDATE_REPO
-            if hasattr(self, 'update_repo_entry'):
-                self.update_repo_entry.delete(0, tk.END)
-                self.update_repo_entry.insert(0, self.update_repo)
-        if "update_branch" in data:
-            self.update_branch = data.get("update_branch") or DEFAULT_UPDATE_BRANCH
-            if hasattr(self, 'update_branch_entry'):
-                self.update_branch_entry.delete(0, tk.END)
-                self.update_branch_entry.insert(0, self.update_branch)
         token_loaded = ""
         if "github_token_enc" in data:
             token_loaded = _decrypt_secret(data.get("github_token_enc") or "")
