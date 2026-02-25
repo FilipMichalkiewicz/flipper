@@ -2065,8 +2065,8 @@ class App:
                 f"cd /d \"{desktop}\"\n"
                 f"rmdir /s /q \"{extract_dir.name}\"\n"
                 f"del /f /q \"{zip_path.name}\"\n"
-                "del /f /q \"%~f0\"\n"
                 "endlocal\n"
+                "(goto) 2>nul & del /q \"%~f0\"\n"
             )
             with open(runner_bat, "w", encoding="utf-8") as f:
                 f.write(runner_content)

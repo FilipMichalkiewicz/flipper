@@ -145,8 +145,13 @@ if exist "%MPV_EXTRACT_DIR%\*.dll" (
     )
 )
 
+echo     Preparing Tcl/Tk data bundles...
+set "ADD_DATA_ARGS="
+if defined TCL_LIBRARY set "ADD_DATA_ARGS=!ADD_DATA_ARGS! --add-data=!TCL_LIBRARY!;tcl"
+if defined TK_LIBRARY set "ADD_DATA_ARGS=!ADD_DATA_ARGS! --add-data=!TK_LIBRARY!;tk"
+
 echo     Packaging with PyInstaller...
-%PY% -m PyInstaller --name Flipper --windowed --onefile --clean --optimize 2 --disable-windowed-traceback --hidden-import=tkinter --hidden-import=_tkinter --collect-submodules=tkinter !ADD_BIN_ARGS! main.py
+%PY% -m PyInstaller --name Flipper --windowed --onefile --clean --optimize 2 --disable-windowed-traceback --hidden-import=tkinter --hidden-import=_tkinter --collect-submodules=tkinter !ADD_BIN_ARGS! !ADD_DATA_ARGS! main.py
 if not exist "%DIST_EXE%" goto :fail
 echo     OK: %DIST_EXE%
 
@@ -179,6 +184,23 @@ if errorlevel 1 (
     echo Skipping interpreter without tkinter: %CAND%
     exit /b 0
 )
+
+REM ── Detect Tcl/Tk data directories ──
+set "TCL_LIBRARY="
+set "TK_LIBRARY="
+for /f "usebackq delims=" %%P in (`cmd /c %CAND% -I -c "import sys,pathlib,glob; base=pathlib.Path(sys.base_prefix); tcl=glob.glob(str(base/'tcl'/'tcl8*')); print(tcl[0] if tcl else '')"`) do set "TCL_LIBRARY=%%P"
+for /f "usebackq delims=" %%P in (`cmd /c %CAND% -I -c "import sys,pathlib,glob; base=pathlib.Path(sys.base_prefix); tk=glob.glob(str(base/'tcl'/'tk8*')); print(tk[0] if tk else '')"`) do set "TK_LIBRARY=%%P"
+
+if not defined TCL_LIBRARY (
+    echo Skipping interpreter without Tcl data dir: %CAND%
+    exit /b 0
+)
+if not defined TK_LIBRARY (
+    echo Skipping interpreter without Tk data dir: %CAND%
+    exit /b 0
+)
+echo     Tcl data: %TCL_LIBRARY%
+echo     Tk  data: %TK_LIBRARY%
 
 set "PY=%CAND%"
 exit /b 0
