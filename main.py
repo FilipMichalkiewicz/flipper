@@ -2526,8 +2526,17 @@ class App:
 
     def _load_session(self):
         session_paths = []
-        if self.save_folder:
+        # 1. Canonical data dir (AppData on Windows)
+        canonical = _get_flipper_data_dir()
+        session_paths.append(os.path.join(canonical, SESSION_FILE))
+        # 2. Current save_folder (if different from canonical)
+        if self.save_folder and os.path.normpath(self.save_folder) != os.path.normpath(canonical):
             session_paths.append(os.path.join(self.save_folder, SESSION_FILE))
+        # 3. Legacy Desktop/flipper-config
+        legacy = os.path.join(str(Path.home()), "Desktop", "flipper-config", SESSION_FILE)
+        if legacy not in session_paths:
+            session_paths.append(legacy)
+        # 4. CWD
         session_paths.append(SESSION_FILE)
 
         session_path = None
@@ -2621,12 +2630,28 @@ class App:
             if hasattr(self, 'github_token_entry'):
                 self.github_token_entry.delete(0, tk.END)
                 self.github_token_entry.insert(0, self.github_token)
+
+        # Restore save_folder, but ALWAYS prefer the canonical data dir
+        # to prevent legacy Desktop/flipper-config paths from persisting.
+        canonical = _get_flipper_data_dir()
         saved_folder = data.get("save_folder", "")
-        if saved_folder:
-            self.save_folder = saved_folder
-            if hasattr(self, 'save_folder_entry'):
-                self.save_folder_entry.delete(0, tk.END)
-                self.save_folder_entry.insert(0, saved_folder)
+        if saved_folder and os.path.isdir(saved_folder):
+            # Accept saved_folder only if it matches canonical or is a custom path
+            # that is NOT a legacy Desktop/flipper-config
+            norm_saved = os.path.normpath(os.path.abspath(saved_folder))
+            norm_canon = os.path.normpath(os.path.abspath(canonical))
+            legacy_desktop = os.path.normpath(
+                os.path.join(str(Path.home()), "Desktop", "flipper-config"))
+            if norm_saved == legacy_desktop and norm_saved != norm_canon:
+                # Migrate: use canonical instead of legacy Desktop path
+                self.save_folder = canonical
+            else:
+                self.save_folder = saved_folder
+        else:
+            self.save_folder = canonical
+        if hasattr(self, 'save_folder_entry'):
+            self.save_folder_entry.delete(0, tk.END)
+            self.save_folder_entry.insert(0, self.save_folder)
 
     # ══════════════════════════════════════════════════════
     #  PROXY TAB LOGIC
