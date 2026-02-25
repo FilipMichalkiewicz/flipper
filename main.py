@@ -993,6 +993,15 @@ class App:
         self.save_folder = _get_flipper_data_dir()
         self.github_token = ""
 
+        # Proxy testing control
+        self._proxy_testing = False
+        self._proxy_paused = threading.Event()
+        self._proxy_paused.set()   # not paused initially
+        self._proxy_stop = threading.Event()
+
+        # MAC status in player: {mac_str: "green"|"red"}
+        self.mac_status = {}
+
         # Account info
         self.account_info_text = ""
         self._is_closing = False
@@ -1422,6 +1431,9 @@ class App:
         self._make_btn(bot, "💾 Zapisz profil", "#00b359", "#009945",
                        self._save_selected_as_profile).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._make_btn(bot, "📂 Import MAC z pliku", "#6d28d9", "#5b21b6",
+                       self._import_macs_from_file).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self.mac_count_label = tk.Label(bot, text="Znaleziono: 0",
                                         font=("Helvetica", 11),
                                         bg=BG_DARK, fg=FG_DIM)
@@ -1439,6 +1451,14 @@ class App:
         self._make_btn(top, "🔄 Pobierz i testuj proxy", ACCENT, "#1d4ed8",
                        self._fetch_proxies).pack(
             side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
+        self.proxy_pause_btn = self._make_btn(
+            top, "⏸ Pauza", "#c78d00", "#a87600",
+            self._toggle_proxy_pause)
+        self.proxy_pause_btn.pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._btn_disable(self.proxy_pause_btn)
+        self._make_btn(top, "📂 Import z pliku", "#6d28d9", "#5b21b6",
+                       self._import_proxies_from_file).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(top, "🗑 Wyczyść listę", "#cc3333", "#aa2222",
                        self._clear_proxies).pack(
             side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
@@ -2505,6 +2525,7 @@ class App:
             "proxy_inline": self.proxy_inline_entry.get(),
             "active_macs": self.active_macs,
             "mac_proxy_map": self.mac_proxy_map,
+            "mac_status": self.mac_status,
             "logs": self.log_history[-MAX_LOG_SAVE:],
             "proxies": get_proxy_list(),
             "profiles": self.profiles,
@@ -2589,6 +2610,7 @@ class App:
             self._insert_mac_row(m)
 
         self.mac_proxy_map = data.get("mac_proxy_map", {})
+        self.mac_status = data.get("mac_status", {})
 
         for msg, tag in data.get("logs", []):
             self.log_text.configure(state=tk.NORMAL)
@@ -2763,80 +2785,226 @@ class App:
                       "info")
 
     def _fetch_proxies(self):
+        if self._proxy_testing:
+            self._log("Test proxy już trwa.", "warning")
+            return
         self._log("Pobieranie listy proxy z API i testowanie...", "info")
         self._set_progress(10, "Pobieranie proxy...")
         threading.Thread(target=self._fetch_proxies_worker,
                          daemon=True).start()
 
+    def _toggle_proxy_pause(self):
+        """Toggle pause/resume for proxy testing."""
+        if not self._proxy_testing:
+            return
+        if self._proxy_paused.is_set():
+            # Currently running → pause
+            self._proxy_paused.clear()
+            self.root.after(0, lambda: self.proxy_pause_btn.configure(
+                text="▶ Wznów"))
+            self._log("Testowanie proxy wstrzymane.", "warning")
+        else:
+            # Currently paused → resume
+            self._proxy_paused.set()
+            self.root.after(0, lambda: self.proxy_pause_btn.configure(
+                text="⏸ Pauza"))
+            self._log("Testowanie proxy wznowione.", "info")
+
+    def _stop_proxy_testing(self):
+        """Stop proxy testing."""
+        self._proxy_stop.set()
+        self._proxy_paused.set()  # unblock if paused
+
+    def _save_proxies_to_file(self):
+        """Save current proxy list to proxy.txt in data dir."""
+        try:
+            data_dir = _get_flipper_data_dir()
+            path = os.path.join(data_dir, "proxy.txt")
+            proxies = get_proxy_list()
+            with open(path, "w", encoding="utf-8") as f:
+                for p in proxies:
+                    f.write(p + "\n")
+        except Exception:
+            pass
+
+    def _import_proxies_from_file(self):
+        """Import proxies from a text file (one per line)."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Importuj proxy z pliku",
+            filetypes=[("Pliki tekstowe", "*.txt"), ("Wszystkie", "*.*")])
+        if not path:
+            return
+        try:
+            count = 0
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Normalize
+                    if line.startswith("http://"):
+                        line = line[7:]
+                    elif line.startswith("https://"):
+                        line = line[8:]
+                    elif line.startswith("socks4://"):
+                        line = line[9:]
+                    elif line.startswith("socks5://"):
+                        line = line[9:]
+                    line = line.strip().rstrip("/")
+                    if ":" in line and len(line) > 7:
+                        proxy = f"http://{line}"
+                        add_proxy(proxy)
+                        count += 1
+            self._refresh_proxy_tree()
+            self._save_proxies_to_file()
+            self._log(f"Zaimportowano {count} proxy z pliku.", "success")
+        except Exception as e:
+            self._log(f"Błąd importu proxy: {e}", "error")
+
+    def _import_macs_from_file(self):
+        """Import MAC addresses from a text file."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Importuj MAC z pliku",
+            filetypes=[("Pliki tekstowe", "*.txt"), ("Wszystkie", "*.*")])
+        if not path:
+            return
+        try:
+            import re
+            mac_pattern = re.compile(
+                r'([0-9A-Fa-f]{2}(?:[:\-])[0-9A-Fa-f]{2}'
+                r'(?:[:\-])[0-9A-Fa-f]{2}(?:[:\-])[0-9A-Fa-f]{2}'
+                r'(?:[:\-])[0-9A-Fa-f]{2}(?:[:\-])[0-9A-Fa-f]{2})')
+            count = 0
+            url = self.url_entry.get().strip()
+            existing = {m["mac"] for m in self.active_macs}
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Try to find MAC pattern in line
+                    match = mac_pattern.search(line)
+                    if match:
+                        mac = match.group(1).upper().replace("-", ":")
+                    else:
+                        # Try raw line as MAC (may lack colons)
+                        clean = line.split("|")[0].split(",")[0].strip()
+                        if len(clean) == 17 and clean.count(":") == 5:
+                            mac = clean.upper()
+                        else:
+                            continue
+                    if mac in existing:
+                        continue
+                    existing.add(mac)
+                    # Also try to extract URL from line (after | separator)
+                    parts = line.split("|")
+                    mac_url = url
+                    for p in parts[1:]:
+                        p = p.strip()
+                        if p.startswith("http"):
+                            mac_url = p
+                            break
+                    self.active_macs.append({
+                        "url": mac_url,
+                        "mac": mac,
+                        "expiry": "imported",
+                        "channels": "?",
+                        "proxy": "",
+                    })
+                    count += 1
+            if count > 0:
+                self._filter_active_macs()
+                self._refresh_player_mac_list()
+                self.mac_count_label.configure(
+                    text=f"Znaleziono: {len(self.active_macs)}")
+                self._auto_save()
+                self._log(f"Zaimportowano {count} MAC z pliku.", "success")
+            else:
+                self._log("Nie znaleziono MAC adresów w pliku.", "warning")
+        except Exception as e:
+            self._log(f"Błąd importu MAC: {e}", "error")
+
     def _fetch_proxies_worker(self):
         max_lat = self._get_max_latency()
-        self._log_safe(f"Pobieranie proxy z API (maks. opóźnienie: {max_lat}s)...", "info")
+        self._proxy_testing = True
+        self._proxy_stop.clear()
+        self._proxy_paused.set()
+        self.root.after(0, lambda: self._btn_enable(self.proxy_pause_btn))
+        self._log_safe(
+            f"Pobieranie proxy z API (maks. opóźnienie: {max_lat}s)...",
+            "info")
 
-        proxies = fetch_free_proxies()
+        def _fetch_cb(source, new, total):
+            self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+                text=f"Pobieranie: +{new} z {source} (łącznie: {total})"))
+
+        proxies = fetch_free_proxies(callback=_fetch_cb)
         if not proxies:
             self._log_safe("Nie udało się pobrać proxy.", "error")
             self._set_progress(100, "Błąd pobierania proxy")
+            self._proxy_testing = False
+            self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
             return
 
         total = len(proxies)
         self._log_safe(
-            f"Pobrano {total} proxy. Testowanie partiami po {PROXY_TEST_BATCH_SIZE}...",
-            "info")
+            f"Pobrano {total} proxy. Testowanie pojedynczo...", "info")
         self._set_progress(25, f"Testowanie {total} proxy...")
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(
             text=f"Testowanie 0/{total} proxy..."))
 
         set_proxy_list([])
         self._proxy_latencies = {}
-        accepted = []
-        tested_total = 0
+        accepted_count = 0
+        tested_count = 0
 
-        for idx in range(0, total, PROXY_TEST_BATCH_SIZE):
-            if self.stop_event.is_set():
+        for i, proxy in enumerate(proxies):
+            # Check stop
+            if self._proxy_stop.is_set():
+                self._log_safe("Testowanie proxy przerwane.", "warning")
+                break
+            # Check pause — block until resumed
+            self._proxy_paused.wait()
+            if self._proxy_stop.is_set():
                 break
 
-            batch = proxies[idx:idx + PROXY_TEST_BATCH_SIZE]
-            batch_no = (idx // PROXY_TEST_BATCH_SIZE) + 1
+            tested_count += 1
+            latency = test_proxy_latency(proxy, timeout=max_lat + 1)
+            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
 
-            def _progress_cb(tested_batch, _total_batch, proxy, latency):
-                overall = idx + tested_batch
-                pct = int(25 + (overall / total) * 65)
-                lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
-                self._set_progress(pct, f"Test proxy {overall}/{total}")
-                self.root.after(0, lambda: self.proxy_test_progress_label.configure(
-                    text=f"Partia {batch_no} — {overall}/{total} — {proxy} → {lat_str}"))
+            pct = int(25 + (tested_count / total) * 65)
+            self._set_progress(pct, f"Test proxy {tested_count}/{total}")
+            self.root.after(0, lambda p=proxy, ls=lat_str, t=tested_count: (
+                self.proxy_test_progress_label.configure(
+                    text=f"{t}/{total} — {p} → {ls}"
+                )
+            ))
 
-            good_batch = test_and_filter_proxies(
-                batch,
-                max_latency=max_lat,
-                max_workers=PROXY_TEST_BATCH_SIZE,
-                callback=_progress_cb,
-            )
+            if latency <= max_lat:
+                accepted_count += 1
+                add_proxy(proxy)
+                self._proxy_latencies[proxy] = latency
+                # Add to tree immediately
+                self.root.after(0, self._add_proxy_to_tree, proxy, latency)
+                self.root.after(0, lambda c=accepted_count: (
+                    self.proxy_count_label.configure(
+                        text=f"Proxy: {c}")
+                ))
+                # Save to file every 10 accepted proxies
+                if accepted_count % 10 == 0:
+                    self._save_proxies_to_file()
 
-            tested_total += len(batch)
-            if good_batch:
-                for proxy, latency in good_batch:
-                    add_proxy(proxy)
-                    self._proxy_latencies[proxy] = latency
-                    accepted.append((proxy, latency))
-                self.root.after(0, self._refresh_proxy_tree)
+        # Final save
+        self._save_proxies_to_file()
 
+        if accepted_count > 0:
             self._log_safe(
-                f"Partia {batch_no}: +{len(good_batch)} / {len(batch)} OK "
-                f"(łącznie: {len(accepted)})",
-                "info")
-
-        if accepted:
-            accepted.sort(key=lambda x: x[1])
-            set_proxy_list([p for p, _ in accepted])
-            self._proxy_latencies = {p: lat for p, lat in accepted}
-            self.root.after(0, self._refresh_proxy_tree)
-            self._log_safe(
-                f"✅ {len(accepted)}/{tested_total} proxy OK "
-                f"(opóźnienie ≤ {max_lat}s). "
-                f"Najszybsze: {accepted[0][1]:.2f}s",
+                f"✅ {accepted_count}/{tested_count} proxy OK "
+                f"(opóźnienie ≤ {max_lat}s).",
                 "success")
-            self._set_progress(100, f"{len(accepted)} proxy gotowych")
+            self._set_progress(100, f"{accepted_count} proxy gotowych")
         else:
             self._log_safe(
                 f"❌ Żadne proxy nie spełnia limitu {max_lat}s!", "error")
@@ -2845,7 +3013,15 @@ class App:
             self.root.after(0, self._refresh_proxy_tree)
             self._set_progress(100, "Brak dobrych proxy")
 
+        self._proxy_testing = False
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
+        self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
+        self.root.after(0, lambda: self.proxy_pause_btn.configure(text="⏸ Pauza"))
+
+    def _add_proxy_to_tree(self, proxy, latency):
+        """Add a single proxy to the tree (called on UI thread)."""
+        lat_str = f"{latency:.2f}s"
+        self.proxy_tree.insert("", tk.END, values=(proxy, lat_str, "OK"))
 
     def _retest_current_proxies(self):
         """Re-test currently loaded proxies and remove slow ones."""
@@ -2853,44 +3029,48 @@ class App:
         if not proxies:
             self._log("Brak proxy do przetestowania.", "warning")
             return
+        if self._proxy_testing:
+            self._log("Test proxy już trwa.", "warning")
+            return
         self._log(f"Ponowne testowanie {len(proxies)} proxy...", "info")
         threading.Thread(target=self._retest_proxies_worker,
                          daemon=True).start()
 
     def _retest_proxies_worker(self):
         max_lat = self._get_max_latency()
+        self._proxy_testing = True
+        self._proxy_stop.clear()
+        self._proxy_paused.set()
+        self.root.after(0, lambda: self._btn_enable(self.proxy_pause_btn))
+
         proxies = get_proxy_list()
         total = len(proxies)
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(
             text=f"Retestowanie 0/{total} proxy..."))
-        self._set_progress(10, f"Retestowanie {total} proxy (partie po {PROXY_TEST_BATCH_SIZE})...")
+        self._set_progress(10, f"Retestowanie {total} proxy...")
 
         accepted = []
         tested_total = 0
 
-        for idx in range(0, total, PROXY_TEST_BATCH_SIZE):
-            if self.stop_event.is_set():
+        for i, proxy in enumerate(proxies):
+            if self._proxy_stop.is_set():
+                break
+            self._proxy_paused.wait()
+            if self._proxy_stop.is_set():
                 break
 
-            batch = proxies[idx:idx + PROXY_TEST_BATCH_SIZE]
-            batch_no = (idx // PROXY_TEST_BATCH_SIZE) + 1
+            tested_total += 1
+            latency = test_proxy_latency(proxy, timeout=max_lat + 1)
+            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
+            pct = int(10 + (tested_total / total) * 80)
+            self._set_progress(pct, f"Retest {tested_total}/{total}")
+            self.root.after(0, lambda p=proxy, ls=lat_str, t=tested_total: (
+                self.proxy_test_progress_label.configure(
+                    text=f"Retest {t}/{total} — {p} → {ls}")
+            ))
 
-            def _progress_cb(tested_batch, _total_batch, proxy, latency):
-                overall = idx + tested_batch
-                pct = int(10 + (overall / total) * 80)
-                lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
-                self._set_progress(pct, f"Retest {overall}/{total}")
-                self.root.after(0, lambda: self.proxy_test_progress_label.configure(
-                    text=f"Retest partia {batch_no} — {overall}/{total} — {proxy} → {lat_str}"))
-
-            good_batch = test_and_filter_proxies(
-                batch,
-                max_latency=max_lat,
-                max_workers=PROXY_TEST_BATCH_SIZE,
-                callback=_progress_cb,
-            )
-            tested_total += len(batch)
-            accepted.extend(good_batch)
+            if latency <= max_lat:
+                accepted.append((proxy, latency))
 
         removed = tested_total - len(accepted)
         if accepted:
@@ -2907,8 +3087,12 @@ class App:
             self._log_safe(f"Retest: wszystkie {tested_total} proxy za wolne!", "error")
 
         self.root.after(0, self._refresh_proxy_tree)
+        self._save_proxies_to_file()
         self._set_progress(100, f"{len(accepted)} proxy po reteście")
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
+        self._proxy_testing = False
+        self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
+        self.root.after(0, lambda: self.proxy_pause_btn.configure(text="⏸ Pauza"))
 
     def _refresh_proxy_tree(self):
         for item in self.proxy_tree.get_children():
@@ -2923,8 +3107,12 @@ class App:
             text=f"Proxy: {len(get_proxy_list())}")
 
     def _clear_proxies(self):
+        if self._proxy_testing:
+            self._stop_proxy_testing()
         set_proxy_list([])
+        self._proxy_latencies = {}
         self._refresh_proxy_tree()
+        self._save_proxies_to_file()
         self._log("Wyczyszczono listę proxy.", "info")
 
     def _add_custom_proxy(self):
@@ -2936,6 +3124,7 @@ class App:
         add_proxy(val)
         self.proxy_add_entry.delete(0, tk.END)
         self._refresh_proxy_tree()
+        self._save_proxies_to_file()
         self._log(f"Dodano proxy: {val}", "info")
 
     def _remove_selected_proxy(self):
@@ -3158,8 +3347,24 @@ class App:
 
     def _refresh_player_mac_list(self):
         self.player_mac_listbox.delete(0, tk.END)
-        for m in self.active_macs:
-            self.player_mac_listbox.insert(tk.END, m["mac"])
+        for i, m in enumerate(self.active_macs):
+            mac = m["mac"]
+            self.player_mac_listbox.insert(tk.END, mac)
+            status = self.mac_status.get(mac)
+            if status == "green":
+                self.player_mac_listbox.itemconfigure(
+                    i, fg="#00ff88", selectforeground="#00ff88")
+            elif status == "red":
+                self.player_mac_listbox.itemconfigure(
+                    i, fg="#ff4444", selectforeground="#ff4444")
+
+    def _set_mac_status(self, mac, status):
+        """Set MAC status color: 'green', 'red', or None to reset."""
+        if status:
+            self.mac_status[mac] = status
+        else:
+            self.mac_status.pop(mac, None)
+        self.root.after(0, self._refresh_player_mac_list)
 
     def _refresh_player_profile_list(self):
         self.player_profile_listbox.delete(0, tk.END)
@@ -3397,6 +3602,8 @@ class App:
             self.root.after(0, self._populate_channel_tree)
             self.root.after(0, lambda: self.player_status_label.configure(
                 text=f"{count} kategorii (cache)"))
+            # Mark MAC green — cache hit means it worked before
+            self._set_mac_status(mac, "green")
 
             # Still do handshake for token
             self._set_progress(90, "Handshake...")
@@ -3414,6 +3621,8 @@ class App:
             self._set_progress(100, "Błąd handshake")
             self.root.after(0, lambda: self.player_status_label.configure(
                 text="Błąd połączenia"))
+            # Mark MAC red — handshake failed
+            self._set_mac_status(mac, "red")
             return
         self.player_token = token
 
@@ -3430,6 +3639,13 @@ class App:
         # Save genres to cache
         cache[genres_cache_key] = genres
         self._save_channels_cache(cache)
+
+        if genres:
+            # Mark MAC green — genres loaded successfully
+            self._set_mac_status(mac, "green")
+        else:
+            # Mark MAC red — no genres returned
+            self._set_mac_status(mac, "red")
 
         self._log_safe(f"Załadowano {len(genres)} kategorii "
                        f"({self.player_content_type}).", "success")
@@ -3937,6 +4153,7 @@ class App:
             if not self.player_token:
                 self._log_safe("Nie udało się uzyskać tokena.", "error")
                 self._set_progress(100, "Błąd")
+                self._set_mac_status(mac, "red")
                 return
 
             self._log_safe(f"Pobieranie URL streamu (cmd={cmd[:60]})...", "info")
@@ -3953,17 +4170,27 @@ class App:
             if not stream_url:
                 self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
                 self._set_progress(100, "Błąd")
+                self._set_mac_status(mac, "red")
                 return
 
             self._log_safe(f"Stream: {stream_url}", "success")
             self._set_progress(100, f"▶ {name}")
             self.current_stream_url = stream_url
+            # Mark MAC green — stream URL obtained successfully
+            self._set_mac_status(mac, "green")
 
             # Play in embedded mpv on UI thread
             self.root.after(0, self._play_stream_on_ui, stream_url, url, mac)
         except Exception as e:
             self._log_safe(f"Błąd odtwarzania: {e}", "error")
             self._set_progress(100, "Błąd")
+            # Try to mark MAC red on exception
+            try:
+                mac, _, _ = self._get_player_mac_url_proxy()
+                if mac:
+                    self._set_mac_status(mac, "red")
+            except Exception:
+                pass
 
     def _play_stream_on_ui(self, stream_url, portal_url=None, mac=None):
         ok = self._mpv_play_url(stream_url, portal_url=portal_url, mac=mac)
@@ -4332,6 +4559,9 @@ class App:
 
         self.stop_event.set()
         self.pause_event.set()
+        # Stop proxy testing if running
+        self._proxy_stop.set()
+        self._proxy_paused.set()
 
         if self.executor:
             try:
