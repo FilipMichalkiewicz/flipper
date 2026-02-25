@@ -14,6 +14,9 @@ import shutil
 import subprocess
 import ctypes
 import traceback
+import zipfile
+import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional
 
@@ -806,6 +809,8 @@ BG_BAR = "#16162a"
 FG_DIM = "#888888"
 ACCENT = "#2563eb"
 MAX_PROXY_RETRIES = 15
+PROXY_TEST_BATCH_SIZE = 5
+AUTO_UPDATE_ZIP_URL = "https://github.com/FilipMichalkiewicz/flipper/archive/refs/heads/main.zip"
 
 
 class App:
@@ -1767,6 +1772,25 @@ class App:
                  wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(4, 0))
 
+        self._sep_dark(page)
+
+        # Auto-update section (Windows)
+        update_frame = tk.Frame(page, bg=BG_DARK)
+        update_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        self._make_btn(update_frame, "⬇️ Auto aktualizacja (GitHub)",
+                       ACCENT, "#1d4ed8",
+                       self._auto_update_from_github).pack(
+            anchor=tk.W, ipady=3, ipadx=6)
+        tk.Label(update_frame,
+                 text=(
+                     "Windows: pobiera ZIP z GitHuba na Pulpit, "
+                     "rozpakowuje, uruchamia build_windows.bat i po buildzie "
+                     "usuwa flipper-main oraz ZIP."
+                 ),
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
+                 wraplength=700, anchor=tk.W, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(4, 0))
+
     def _sep_dark(self, parent):
         tk.Frame(parent, height=1, bg="#333355").pack(
             fill=tk.X, padx=20, pady=8)
@@ -1812,6 +1836,75 @@ class App:
         if os.path.exists(path):
             os.remove(path)
         self._log("Cache kanałów wyczyszczony.", "info")
+
+    def _auto_update_from_github(self):
+        if sys.platform != "win32":
+            self._log("Auto aktualizacja jest dostępna tylko na Windows.", "warning")
+            return
+        self._log("Start auto aktualizacji z GitHuba...", "info")
+        self._set_progress(5, "Auto aktualizacja...")
+        threading.Thread(target=self._auto_update_worker, daemon=True).start()
+
+    def _auto_update_worker(self):
+        desktop = Path.home() / "Desktop"
+        zip_path = desktop / "flipper-main.zip"
+        extract_dir = desktop / "flipper-main"
+        runner_bat = desktop / "flipper_update_runner.bat"
+
+        try:
+            self._set_progress(15, "Pobieranie ZIP...")
+            self._log_safe(f"Pobieram: {AUTO_UPDATE_ZIP_URL}", "info")
+
+            if zip_path.exists():
+                zip_path.unlink(missing_ok=True)
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir, ignore_errors=True)
+
+            with urllib.request.urlopen(AUTO_UPDATE_ZIP_URL, timeout=40) as resp:
+                with open(zip_path, "wb") as out:
+                    out.write(resp.read())
+
+            self._set_progress(35, "Rozpakowywanie ZIP...")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(desktop)
+
+            build_bat = extract_dir / "build_windows.bat"
+            if not build_bat.exists():
+                self._log_safe("Brak build_windows.bat w pobranej paczce.", "error")
+                self._set_progress(100, "Błąd aktualizacji")
+                return
+
+            self._set_progress(55, "Przygotowanie build runner...")
+            runner_content = (
+                "@echo off\n"
+                "setlocal\n"
+                f"cd /d \"{extract_dir}\"\n"
+                "call build_windows.bat\n"
+                f"cd /d \"{desktop}\"\n"
+                "rmdir /s /q \"flipper-main\"\n"
+                "del /f /q \"flipper-main.zip\"\n"
+                "del /f /q \"%~f0\"\n"
+                "endlocal\n"
+            )
+            with open(runner_bat, "w", encoding="utf-8") as f:
+                f.write(runner_content)
+
+            self._set_progress(75, "Uruchamianie build_windows.bat...")
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", str(runner_bat)],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+
+            self._log_safe(
+                "Auto aktualizacja uruchomiona. Zamykam stare okno...",
+                "success",
+            )
+            self._set_progress(100, "Aktualizacja uruchomiona")
+            self.root.after(500, self.root.destroy)
+
+        except Exception as e:
+            self._log_safe(f"Błąd auto aktualizacji: {e}", "error")
+            self._set_progress(100, "Błąd aktualizacji")
 
     # ══════════════════════════════════════════════════════
     #  WIDGET HELPERS
@@ -2303,33 +2396,65 @@ class App:
             self._set_progress(100, "Błąd pobierania proxy")
             return
 
-        self._log_safe(f"Pobrano {len(proxies)} proxy. Testowanie opóźnień...", "info")
-        self._set_progress(30, f"Testowanie {len(proxies)} proxy...")
+        total = len(proxies)
+        self._log_safe(
+            f"Pobrano {total} proxy. Testowanie partiami po {PROXY_TEST_BATCH_SIZE}...",
+            "info")
+        self._set_progress(25, f"Testowanie {total} proxy...")
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(
-            text=f"Testowanie 0/{len(proxies)} proxy..."))
+            text=f"Testowanie 0/{total} proxy..."))
 
-        def _progress_cb(tested, total, proxy, latency):
-            pct = int(30 + (tested / total) * 60)
-            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
-            self._set_progress(pct, f"Test proxy {tested}/{total}")
-            self.root.after(0, lambda: self.proxy_test_progress_label.configure(
-                text=f"Testowanie {tested}/{total} — {proxy} → {lat_str}"))
+        set_proxy_list([])
+        self._proxy_latencies = {}
+        accepted = []
+        tested_total = 0
 
-        good_proxies = test_and_filter_proxies(
-            proxies, max_latency=max_lat, callback=_progress_cb)
+        for idx in range(0, total, PROXY_TEST_BATCH_SIZE):
+            if self.stop_event.is_set():
+                break
 
-        if good_proxies:
-            proxy_list = [p for p, _ in good_proxies]
-            set_proxy_list(proxy_list)
-            # Store latency info for display
-            self._proxy_latencies = {p: lat for p, lat in good_proxies}
+            batch = proxies[idx:idx + PROXY_TEST_BATCH_SIZE]
+            batch_no = (idx // PROXY_TEST_BATCH_SIZE) + 1
+
+            def _progress_cb(tested_batch, _total_batch, proxy, latency):
+                overall = idx + tested_batch
+                pct = int(25 + (overall / total) * 65)
+                lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
+                self._set_progress(pct, f"Test proxy {overall}/{total}")
+                self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+                    text=f"Partia {batch_no} — {overall}/{total} — {proxy} → {lat_str}"))
+
+            good_batch = test_and_filter_proxies(
+                batch,
+                max_latency=max_lat,
+                max_workers=PROXY_TEST_BATCH_SIZE,
+                callback=_progress_cb,
+            )
+
+            tested_total += len(batch)
+            if good_batch:
+                for proxy, latency in good_batch:
+                    add_proxy(proxy)
+                    self._proxy_latencies[proxy] = latency
+                    accepted.append((proxy, latency))
+                self.root.after(0, self._refresh_proxy_tree)
+
             self._log_safe(
-                f"✅ {len(good_proxies)}/{len(proxies)} proxy OK "
-                f"(opóźnienie ≤ {max_lat}s). "
-                f"Najszybsze: {good_proxies[0][1]:.2f}s",
-                "success")
+                f"Partia {batch_no}: +{len(good_batch)} / {len(batch)} OK "
+                f"(łącznie: {len(accepted)})",
+                "info")
+
+        if accepted:
+            accepted.sort(key=lambda x: x[1])
+            set_proxy_list([p for p, _ in accepted])
+            self._proxy_latencies = {p: lat for p, lat in accepted}
             self.root.after(0, self._refresh_proxy_tree)
-            self._set_progress(100, f"{len(good_proxies)} proxy gotowych")
+            self._log_safe(
+                f"✅ {len(accepted)}/{tested_total} proxy OK "
+                f"(opóźnienie ≤ {max_lat}s). "
+                f"Najszybsze: {accepted[0][1]:.2f}s",
+                "success")
+            self._set_progress(100, f"{len(accepted)} proxy gotowych")
         else:
             self._log_safe(
                 f"❌ Żadne proxy nie spełnia limitu {max_lat}s!", "error")
@@ -2356,33 +2481,51 @@ class App:
         total = len(proxies)
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(
             text=f"Retestowanie 0/{total} proxy..."))
-        self._set_progress(10, f"Retestowanie {total} proxy...")
+        self._set_progress(10, f"Retestowanie {total} proxy (partie po {PROXY_TEST_BATCH_SIZE})...")
 
-        def _progress_cb(tested, total_p, proxy, latency):
-            pct = int(10 + (tested / total_p) * 80)
-            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
-            self._set_progress(pct, f"Retest {tested}/{total_p}")
-            self.root.after(0, lambda: self.proxy_test_progress_label.configure(
-                text=f"Retestowanie {tested}/{total_p} — {proxy} → {lat_str}"))
+        accepted = []
+        tested_total = 0
 
-        good_proxies = test_and_filter_proxies(
-            proxies, max_latency=max_lat, callback=_progress_cb)
+        for idx in range(0, total, PROXY_TEST_BATCH_SIZE):
+            if self.stop_event.is_set():
+                break
 
-        removed = total - len(good_proxies)
-        if good_proxies:
-            proxy_list = [p for p, _ in good_proxies]
+            batch = proxies[idx:idx + PROXY_TEST_BATCH_SIZE]
+            batch_no = (idx // PROXY_TEST_BATCH_SIZE) + 1
+
+            def _progress_cb(tested_batch, _total_batch, proxy, latency):
+                overall = idx + tested_batch
+                pct = int(10 + (overall / total) * 80)
+                lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
+                self._set_progress(pct, f"Retest {overall}/{total}")
+                self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+                    text=f"Retest partia {batch_no} — {overall}/{total} — {proxy} → {lat_str}"))
+
+            good_batch = test_and_filter_proxies(
+                batch,
+                max_latency=max_lat,
+                max_workers=PROXY_TEST_BATCH_SIZE,
+                callback=_progress_cb,
+            )
+            tested_total += len(batch)
+            accepted.extend(good_batch)
+
+        removed = tested_total - len(accepted)
+        if accepted:
+            accepted.sort(key=lambda x: x[1])
+            proxy_list = [p for p, _ in accepted]
             set_proxy_list(proxy_list)
-            self._proxy_latencies = {p: lat for p, lat in good_proxies}
+            self._proxy_latencies = {p: lat for p, lat in accepted}
             self._log_safe(
-                f"Retest: {len(good_proxies)}/{total} OK, "
+                f"Retest: {len(accepted)}/{tested_total} OK, "
                 f"usunięto {removed} wolnych proxy.", "success")
         else:
             set_proxy_list([])
             self._proxy_latencies = {}
-            self._log_safe(f"Retest: wszystkie {total} proxy za wolne!", "error")
+            self._log_safe(f"Retest: wszystkie {tested_total} proxy za wolne!", "error")
 
         self.root.after(0, self._refresh_proxy_tree)
-        self._set_progress(100, f"{len(good_proxies)} proxy po reteście")
+        self._set_progress(100, f"{len(accepted)} proxy po reteście")
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
 
     def _refresh_proxy_tree(self):
@@ -3294,6 +3437,62 @@ class App:
             return
         self._play_channel_entry(ch)
 
+    def _extract_stream_url_from_cmd(self, cmd: str) -> Optional[str]:
+        if not cmd:
+            return None
+        raw = str(cmd).strip()
+        if raw.startswith("ffmpeg "):
+            raw = raw[7:].strip()
+        for token in raw.replace("\"", " ").split():
+            if token.startswith(("http://", "https://")):
+                return token.strip()
+        if raw.startswith(("http://", "https://")):
+            return raw
+        return None
+
+    def _is_suspicious_stream_url(self, stream_url: Optional[str]) -> bool:
+        if not stream_url:
+            return True
+        try:
+            parsed = urlparse(stream_url)
+            path = (parsed.path or "").lower()
+            if path.endswith(("/movie.php", "/live.php", "/series.php")) and not parsed.query:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _resolve_stream_url(self, url, mac, cmd, timeout, proxy):
+        ctype = self.player_content_type
+        stream_url = get_stream_url(
+            url, mac, self.player_token, cmd,
+            content_type=ctype,
+            timeout=timeout, proxy=proxy)
+
+        # If portal returns incomplete URL (e.g. /movie.php without query),
+        # try alternate content types first.
+        if self._is_suspicious_stream_url(stream_url):
+            for alt in ("itv", "vod", "series"):
+                if alt == ctype:
+                    continue
+                alt_url = get_stream_url(
+                    url, mac, self.player_token, cmd,
+                    content_type=alt,
+                    timeout=timeout, proxy=proxy)
+                if alt_url and not self._is_suspicious_stream_url(alt_url):
+                    self._log_safe(f"Użyto alternatywnego typu streamu: {alt}", "info")
+                    stream_url = alt_url
+                    break
+
+        # Final fallback: parse direct URL from cmd
+        if self._is_suspicious_stream_url(stream_url):
+            cmd_url = self._extract_stream_url_from_cmd(cmd)
+            if cmd_url:
+                self._log_safe("Fallback: używam URL bezpośrednio z cmd.", "warning")
+                stream_url = cmd_url
+
+        return stream_url
+
     def _play_channel_entry(self, ch):
         cmd = ch.get("cmd", "")
         name = ch.get("name", ch.get("o_name", "?"))
@@ -3329,20 +3528,16 @@ class App:
                 return
 
             self._log_safe(f"Pobieranie URL streamu (cmd={cmd[:60]})...", "info")
-            stream_url = get_stream_url(
-                url, mac, self.player_token, cmd,
-                content_type=self.player_content_type,
-                timeout=timeout, proxy=proxy)
+            stream_url = self._resolve_stream_url(
+                url, mac, cmd, timeout, proxy)
             if not stream_url:
                 # Token might have expired, retry with fresh handshake
                 self._log_safe("Brak URL — próba z nowym tokenem...", "warning")
                 self.player_token, _ = get_handshake(
                     url, mac, timeout=timeout, proxy=proxy)
                 if self.player_token:
-                    stream_url = get_stream_url(
-                        url, mac, self.player_token, cmd,
-                        content_type=self.player_content_type,
-                        timeout=timeout, proxy=proxy)
+                    stream_url = self._resolve_stream_url(
+                        url, mac, cmd, timeout, proxy)
             if not stream_url:
                 self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
                 self._set_progress(100, "Błąd")
@@ -3433,10 +3628,8 @@ class App:
                 url, mac, timeout=timeout, proxy=proxy)
         if not self.player_token:
             return
-        stream_url = get_stream_url(
-            url, mac, self.player_token, cmd,
-            content_type=self.player_content_type,
-            timeout=timeout, proxy=proxy)
+        stream_url = self._resolve_stream_url(
+            url, mac, cmd, timeout, proxy)
         if not stream_url:
             self._log_safe(f"Nie udało się pobrać URL: {name}", "error")
             return
