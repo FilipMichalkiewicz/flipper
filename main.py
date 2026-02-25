@@ -927,7 +927,7 @@ def _diagnose_mpv_availability():
 MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
 CHANNELS_CACHE_FILE = "channels_cache.json"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 BG_DARK = "#0a0a1e"
 BG_SIDEBAR = "#1a1a2e"
 BG_INPUT = "#12122a"
@@ -2030,13 +2030,15 @@ class App:
         self._log("Cache kanałów wyczyszczony.", "info")
 
     def _check_version_on_startup(self):
-        """Check version.txt on GitHub and auto-update if different."""
+        """Check version.txt on GitHub; if newer, fetch changes.txt and show update dialog."""
         import time as _time
         _time.sleep(3)  # wait for session to load and UI to settle
         try:
             token = self._get_github_token()
             if not token:
                 return
+
+            # Fetch remote version
             ver_url = (f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}"
                        f"/contents/version.txt?ref={DEFAULT_UPDATE_BRANCH}")
             req = urllib.request.Request(
@@ -2051,16 +2053,105 @@ class App:
                 remote_version = resp.read().decode("utf-8").strip()
 
             local_version = APP_VERSION
-            if remote_version and remote_version != local_version:
-                self._log_safe(
-                    f"Nowa wersja dostępna: {remote_version} (obecna: {local_version}). Aktualizuję...",
-                    "warning",
-                )
-                self.root.after(0, self._auto_update_from_github)
-            else:
+            if not remote_version or remote_version == local_version:
                 self._log_safe(f"Wersja aktualna: {local_version}", "dim")
+                return
+
+            # Fetch changes.txt
+            changes_text = ""
+            try:
+                changes_url = (
+                    f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}"
+                    f"/contents/changes.txt?ref={DEFAULT_UPDATE_BRANCH}")
+                req2 = urllib.request.Request(
+                    changes_url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github.v3.raw",
+                        "User-Agent": "Flipper-Updater",
+                    },
+                )
+                with urllib.request.urlopen(req2, timeout=10) as resp2:
+                    changes_text = resp2.read().decode("utf-8").strip()
+            except Exception:
+                changes_text = "(Nie udało się pobrać listy zmian)"
+
+            self._log_safe(
+                f"Nowa wersja dostępna: {remote_version} (obecna: {local_version})",
+                "warning",
+            )
+            # Show update dialog on UI thread
+            self.root.after(0, self._show_update_dialog,
+                            local_version, remote_version, changes_text)
         except Exception:
             pass
+
+    def _show_update_dialog(self, local_ver, remote_ver, changes_text):
+        """Show a modal dialog asking the user to update."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Dostępna aktualizacja")
+        dialog.configure(bg=BG_DARK)
+        dialog.geometry("520x420")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 520) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 420) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        tk.Label(dialog, text="🔄 Nowa wersja Flipper!",
+                 font=("Helvetica", 16, "bold"),
+                 bg=BG_DARK, fg="#00d4ff").pack(pady=(16, 4))
+
+        tk.Label(dialog,
+                 text=f"Obecna: {local_ver}  →  Nowa: {remote_ver}",
+                 font=("Helvetica", 12),
+                 bg=BG_DARK, fg="#aaaaaa").pack(pady=(0, 8))
+
+        tk.Label(dialog, text="Co nowego:",
+                 font=("Helvetica", 11, "bold"),
+                 bg=BG_DARK, fg="#c8c8e0", anchor=tk.W).pack(
+            fill=tk.X, padx=20, pady=(4, 2))
+
+        # Changes text area
+        changes_frame = tk.Frame(dialog, bg=BG_DARK)
+        changes_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 8))
+
+        changes_box = tk.Text(
+            changes_frame, font=("Helvetica", 10),
+            bg=BG_INPUT, fg="#d0d0e8", wrap=tk.WORD,
+            relief="flat", bd=2, highlightthickness=0,
+            padx=8, pady=6)
+        ch_sb = tk.Scrollbar(changes_frame, command=changes_box.yview)
+        changes_box.configure(yscrollcommand=ch_sb.set)
+        ch_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        changes_box.pack(fill=tk.BOTH, expand=True)
+        changes_box.insert("1.0", changes_text or "(brak informacji)")
+        changes_box.configure(state=tk.DISABLED)
+
+        # Buttons
+        btn_frame = tk.Frame(dialog, bg=BG_DARK)
+        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 16))
+
+        def _do_update():
+            dialog.destroy()
+            self._auto_update_from_github()
+
+        def _skip():
+            dialog.destroy()
+            self._log("Aktualizacja pominięta.", "dim")
+
+        self._make_btn(btn_frame, "✅ Aktualizuj", "#00b359", "#009945",
+                       _do_update).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4),
+            ipady=6)
+        self._make_btn(btn_frame, "❌ Pomiń", "#cc3333", "#aa2222",
+                       _skip).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0),
+            ipady=6)
 
     def _get_github_token(self) -> str:
         """Get GitHub token: prefer entry widget, fallback to self.github_token."""
