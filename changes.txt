@@ -1,12 +1,5 @@
-Wersja 1.1.0:
-- 37 źródeł proxy (było 15), bez limitu — pobiera wszystkie dostępne
-- Testowanie proxy pojedynczo z natychmiastowym dodawaniem do listy
-- Przycisk Pauza/Wznów do kontroli testowania proxy
-- Import proxy z pliku tekstowego
-- Import MAC adresów z pliku (auto-detekcja formatu)
-- Kolorowanie MAC w Playerze: zielony = działa, czerwony = błąd
-- Zapis proxy do pliku proxy.txt automatycznie
-- Pełne nagłówki Stalker Portal (MAG STB UA, Cookie, X-User-Agent)
-- Popup z listą zmian przy dostępnej aktualizacji
-- Naprawiono czyszczenie plików po aktualizacji
-- Naprawiono zapis sesji zawsze do AppData/Flipper
+Wersja 1.2.0:
+- Ręczne dodawanie MAC: pole MAC + URL + przycisk Dodaj na zakładce Aktywne MAC
+- Losowy MAC: przycisk generuje losowy MAC z zadanym prefiksem
+- Walidacja formatu MAC przy dodawaniu
+- Sprawdzanie duplikatów MAC

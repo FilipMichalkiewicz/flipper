@@ -927,7 +927,7 @@ def _diagnose_mpv_availability():
 MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
 CHANNELS_CACHE_FILE = "channels_cache.json"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 BG_DARK = "#0a0a1e"
 BG_SIDEBAR = "#1a1a2e"
 BG_INPUT = "#12122a"
@@ -1391,6 +1391,36 @@ class App:
         self.mac_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
                                    padx=(0, 4), ipady=3)
         self.mac_search_var.trace_add("write", self._filter_active_macs)
+
+        # Add MAC manually row
+        add_mac_frame = tk.Frame(page, bg=BG_DARK)
+        add_mac_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
+
+        tk.Label(add_mac_frame, text="MAC:", font=("Helvetica", 10, "bold"),
+                 bg=BG_DARK, fg="#c8c8e0").pack(side=tk.LEFT, padx=(4, 2))
+        self.add_mac_entry = tk.Entry(
+            add_mac_frame, font=("Helvetica", 11), width=20,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.add_mac_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=3)
+        self.add_mac_entry.insert(0, "00:1A:79:")
+
+        tk.Label(add_mac_frame, text="URL:", font=("Helvetica", 10, "bold"),
+                 bg=BG_DARK, fg="#c8c8e0").pack(side=tk.LEFT, padx=(4, 2))
+        self.add_mac_url_entry = tk.Entry(
+            add_mac_frame, font=("Helvetica", 11), width=30,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.add_mac_url_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=3)
+
+        self._make_btn(add_mac_frame, "➕ Dodaj", "#00b359", "#009945",
+                       self._add_mac_manually).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
+        self._make_btn(add_mac_frame, "🎲 Losowy", "#6d28d9", "#5b21b6",
+                       self._add_random_mac).pack(
+            side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
         tf = tk.Frame(page, bg=BG_DARK)
         tf.pack(fill=tk.BOTH, expand=True)
@@ -2952,6 +2982,73 @@ class App:
             self._log(f"Zaimportowano {count} proxy z pliku.", "success")
         except Exception as e:
             self._log(f"Błąd importu proxy: {e}", "error")
+
+    def _add_mac_manually(self):
+        """Add a MAC address manually from the entry fields."""
+        mac = self.add_mac_entry.get().strip().upper()
+        url = self.add_mac_url_entry.get().strip()
+        if not url:
+            url = self.url_entry.get().strip()
+        if not mac:
+            self._log("Wpisz adres MAC.", "warning")
+            return
+        # Validate MAC format (basic check)
+        mac = mac.replace("-", ":")
+        parts = mac.split(":")
+        if len(parts) != 6 or not all(len(p) == 2 for p in parts):
+            self._log("Nieprawidłowy format MAC (XX:XX:XX:XX:XX:XX).", "error")
+            return
+        if not url:
+            self._log("Podaj URL serwera w polu URL lub obok MAC.", "warning")
+            return
+        # Check for duplicates
+        existing = {m["mac"] for m in self.active_macs}
+        if mac in existing:
+            self._log(f"MAC {mac} już jest na liście.", "warning")
+            return
+        self._add_active_mac(url, mac, "ręczny", proxy="", channels="?")
+        self._refresh_player_mac_list()
+        self._auto_save()
+        self._log(f"Dodano MAC: {mac}", "success")
+
+    def _add_random_mac(self):
+        """Generate a random MAC and add it."""
+        url = self.add_mac_url_entry.get().strip()
+        if not url:
+            url = self.url_entry.get().strip()
+        if not url:
+            self._log("Podaj URL serwera.", "warning")
+            return
+        prefix = self.add_mac_entry.get().strip().upper().replace("-", ":")
+        # Use prefix if it looks like first bytes, otherwise default
+        if prefix and len(prefix) >= 8 and prefix.count(":") >= 2:
+            # Take first N complete bytes as prefix
+            parts = prefix.split(":")
+            prefix_bytes = ":".join(p for p in parts if len(p) == 2)
+            colon_count = prefix_bytes.count(":")
+            if colon_count < 5:
+                # Generate remaining bytes
+                remaining = 5 - colon_count
+                from random import randint
+                tail = ":".join(f"{randint(0, 255):02X}" for _ in range(remaining))
+                mac = prefix_bytes + ":" + tail
+            else:
+                mac = prefix_bytes
+        else:
+            mac = generate_random_mac()
+        # Check for duplicates
+        existing = {m["mac"] for m in self.active_macs}
+        if mac in existing:
+            mac = generate_random_mac()  # try once more
+        if mac in existing:
+            self._log("Nie udało się wygenerować unikalnego MAC.", "warning")
+            return
+        self.add_mac_entry.delete(0, tk.END)
+        self.add_mac_entry.insert(0, mac)
+        self._add_active_mac(url, mac, "losowy", proxy="", channels="?")
+        self._refresh_player_mac_list()
+        self._auto_save()
+        self._log(f"Dodano losowy MAC: {mac}", "success")
 
     def _import_macs_from_file(self):
         """Import MAC addresses from a text file."""
