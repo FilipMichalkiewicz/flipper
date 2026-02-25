@@ -3630,10 +3630,19 @@ class App:
             self._init_mpv()
         return self.mpv_player is not None
 
-    def _mpv_play_url(self, stream_url):
+    def _mpv_play_url(self, stream_url, portal_url=None):
         if not self._ensure_mpv():
             return False
         try:
+            # Set HTTP headers matching Stalker Portal / MAG device
+            ua = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+            headers = [f"User-Agent: {ua}"]
+            if portal_url:
+                headers.append(f"Referer: {portal_url}")
+            try:
+                self.mpv_player["http-header-fields"] = headers
+            except Exception:
+                pass
             self._log(f"mpv.play({stream_url[:80]}...)", "info")
             self.mpv_player.play(stream_url)
             return True
@@ -3832,13 +3841,13 @@ class App:
             self.current_stream_url = stream_url
 
             # Play in embedded mpv on UI thread
-            self.root.after(0, self._play_stream_on_ui, stream_url)
+            self.root.after(0, self._play_stream_on_ui, stream_url, url)
         except Exception as e:
             self._log_safe(f"Błąd odtwarzania: {e}", "error")
             self._set_progress(100, "Błąd")
 
-    def _play_stream_on_ui(self, stream_url):
-        ok = self._mpv_play_url(stream_url)
+    def _play_stream_on_ui(self, stream_url, portal_url=None):
+        ok = self._mpv_play_url(stream_url, portal_url=portal_url)
         if ok:
             self._log("Odtwarzanie w wbudowanym mpv.", "success")
         else:
