@@ -1907,25 +1907,29 @@ class App:
         form = tk.Frame(update_frame, bg=BG_DARK)
         form.pack(fill=tk.X, pady=(0, 4))
 
-        tk.Label(
-            form,
-            text=f"Źródło update: {DEFAULT_UPDATE_REPO} ({DEFAULT_UPDATE_BRANCH})",
-            font=("Helvetica", 10),
-            bg=BG_DARK,
-            fg=FG_DIM,
-        ).grid(row=0, column=0, columnspan=4, sticky="w")
-
         tk.Label(form, text="GitHub token:", font=("Helvetica", 11, "bold"),
-                 bg=BG_DARK, fg="#d0d0e8").grid(row=1, column=0, sticky="w", pady=(6, 0))
+                 bg=BG_DARK, fg="#d0d0e8").grid(row=0, column=0, sticky="w", pady=(6, 0))
         self.github_token_entry = tk.Entry(
             form, font=("Helvetica", 11),
             bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
             relief="flat", highlightthickness=1,
             highlightcolor=ACCENT, highlightbackground="#333355",
             show="*")
-        self.github_token_entry.grid(row=1, column=1, columnspan=3, sticky="we", padx=(6, 0), pady=(6, 0), ipady=2)
+        self.github_token_entry.grid(row=0, column=1, sticky="we", padx=(6, 0), pady=(6, 0), ipady=2)
         if self.github_token:
             self.github_token_entry.insert(0, self.github_token)
+
+        save_tok_btn = tk.Button(
+            form, text="💾 Zapisz", font=("Helvetica", 10, "bold"),
+            bg=ACCENT, fg="#ffffff", activebackground="#1d4ed8",
+            activeforeground="#ffffff", relief="flat", cursor="hand2",
+            command=self._save_github_token)
+        save_tok_btn.grid(row=0, column=2, padx=(6, 0), pady=(6, 0), ipady=1, ipadx=4)
+
+        self.token_status_label = tk.Label(
+            form, text="", font=("Helvetica", 10),
+            bg=BG_DARK, fg="#4ade80")
+        self.token_status_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         form.grid_columnconfigure(1, weight=1)
 
@@ -1956,6 +1960,17 @@ class App:
             self.save_folder_entry.delete(0, tk.END)
             self.save_folder_entry.insert(0, folder)
             self._log(f"Folder zapisu: {folder}", "info")
+
+    def _save_github_token(self):
+        """Encrypt and persist the GitHub token immediately."""
+        token = self.github_token_entry.get().strip()
+        if not token:
+            self.token_status_label.config(text="⚠️ Token jest pusty", fg="#facc15")
+            return
+        self.github_token = token
+        self._save_session()
+        self.token_status_label.config(text="✅ Klucz zaszyfrowany i zapisany", fg="#4ade80")
+        self._log("GitHub token zapisany (zaszyfrowany).", "success")
 
     # ══════════════════════════════════════════════════════
     #  CHANNEL CACHE
