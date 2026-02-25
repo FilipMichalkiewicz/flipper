@@ -214,6 +214,8 @@ def make_params(mac: str, action: str, _type: str) -> dict:
 def _request_get(url, params=None, headers=None, cookies=None,
                  timeout=5, proxy=None):
     proxies = _make_proxies_dict(proxy)
+    if headers and "X-User-Agent" not in headers:
+        headers["X-User-Agent"] = "Model: MAG250; Link: Ethernet"
     return requests.get(url, params=params, headers=headers,
                         cookies=cookies, timeout=timeout, proxies=proxies)
 

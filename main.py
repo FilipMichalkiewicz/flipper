@@ -2143,8 +2143,10 @@ class App:
                 f"cd /d \"{extract_dir}\"\n"
                 "call build_windows.bat\n"
                 f"cd /d \"{desktop}\"\n"
-                f"rmdir /s /q \"{extract_dir.name}\"\n"
-                f"del /f /q \"{zip_path.name}\"\n"
+                f"attrib -h \"{extract_dir}\" >nul 2>nul\n"
+                f"rmdir /s /q \"{extract_dir}\"\n"
+                f"attrib -h \"{zip_path}\" >nul 2>nul\n"
+                f"del /f /q \"{zip_path}\"\n"
                 "endlocal\n"
                 "(goto) 2>nul & del /q \"%~f0\"\n"
             )
@@ -2492,6 +2494,8 @@ class App:
 
     def _save_session(self):
         token_plain = self._get_github_token()
+        # Always save to canonical data dir to avoid split-brain
+        canonical = _get_flipper_data_dir()
         data = {
             "url": self.url_entry.get(),
             "mac_prefix": self.mac_entry.get(),
@@ -2517,8 +2521,7 @@ class App:
             "github_token_enc": _encrypt_secret(token_plain),
         }
         try:
-            save_path = (os.path.join(self.save_folder, SESSION_FILE)
-                         if self.save_folder else SESSION_FILE)
+            save_path = os.path.join(canonical, SESSION_FILE)
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
@@ -3735,15 +3738,26 @@ class App:
             self._init_mpv()
         return self.mpv_player is not None
 
-    def _mpv_play_url(self, stream_url, portal_url=None):
+    def _mpv_play_url(self, stream_url, portal_url=None, mac=None):
         if not self._ensure_mpv():
             return False
         try:
-            # Set HTTP headers matching Stalker Portal / MAG device
-            ua = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
-            headers = [f"User-Agent: {ua}"]
+            # Set HTTP headers matching Stalker Portal / MAG STB device
+            ua = ("Mozilla/5.0 (QtEmbedded; U; Linux; C) "
+                  "AppleWebKit/533.3 (KHTML, like Gecko) "
+                  "MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3")
+            headers = [
+                f"User-Agent: {ua}",
+                "X-User-Agent: Model: MAG250; Link: Ethernet",
+            ]
             if portal_url:
                 headers.append(f"Referer: {portal_url}")
+            if mac:
+                import hashlib as _hl
+                sn = _hl.md5(mac.encode()).hexdigest()
+                cookie = (f"mac={mac}; sn={sn}; "
+                          "stb_lang=en; timezone=Europe/Amsterdam")
+                headers.append(f"Cookie: {cookie}")
             try:
                 self.mpv_player["http-header-fields"] = headers
             except Exception:
@@ -3946,13 +3960,13 @@ class App:
             self.current_stream_url = stream_url
 
             # Play in embedded mpv on UI thread
-            self.root.after(0, self._play_stream_on_ui, stream_url, url)
+            self.root.after(0, self._play_stream_on_ui, stream_url, url, mac)
         except Exception as e:
             self._log_safe(f"Błąd odtwarzania: {e}", "error")
             self._set_progress(100, "Błąd")
 
-    def _play_stream_on_ui(self, stream_url, portal_url=None):
-        ok = self._mpv_play_url(stream_url, portal_url=portal_url)
+    def _play_stream_on_ui(self, stream_url, portal_url=None, mac=None):
+        ok = self._mpv_play_url(stream_url, portal_url=portal_url, mac=mac)
         if ok:
             self._log("Odtwarzanie w wbudowanym mpv.", "success")
         else:
