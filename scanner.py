@@ -106,6 +106,18 @@ def fetch_free_proxies() -> List[str]:
         "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=&ssl=all&anonymity=all",
         "https://www.proxy-list.download/api/v1/get?type=http",
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
+        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
+        "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+        "https://api.openproxylist.xyz/http.txt",
+        "https://proxyspace.pro/http.txt",
     ]
     for api_url in urls:
         try:
@@ -119,9 +131,56 @@ def fetch_free_proxies() -> List[str]:
                             proxies.append(p)
         except Exception:
             continue
-        if len(proxies) > 50:
-            break
-    return proxies[:200]
+    return proxies[:500]
+
+
+def test_proxy_latency(proxy: str, timeout: float = 5.0) -> float:
+    """Test proxy latency in seconds. Returns latency or float('inf') on failure."""
+    test_url = "http://httpbin.org/ip"
+    proxies_dict = {"http": proxy, "https": proxy}
+    try:
+        start = time.time()
+        r = requests.get(test_url, proxies=proxies_dict, timeout=timeout)
+        elapsed = time.time() - start
+        if r.status_code == 200:
+            return round(elapsed, 3)
+    except Exception:
+        pass
+    return float('inf')
+
+
+def test_and_filter_proxies(proxies: List[str], max_latency: float = 4.0,
+                            max_workers: int = 30,
+                            callback=None) -> List[Tuple[str, float]]:
+    """Test all proxies in parallel and return sorted list of (proxy, latency)
+    where latency <= max_latency. Calls callback(tested, total, proxy, latency)
+    for progress updates."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = []
+    total = len(proxies)
+    tested = [0]  # mutable counter for thread safety
+    lock = threading.Lock()
+
+    def _test(p):
+        lat = test_proxy_latency(p, timeout=max_latency + 1)
+        with lock:
+            tested[0] += 1
+        if callback:
+            callback(tested[0], total, p, lat)
+        return (p, lat)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_test, p): p for p in proxies}
+        for future in as_completed(futures):
+            try:
+                proxy, latency = future.result()
+                if latency <= max_latency:
+                    results.append((proxy, latency))
+            except Exception:
+                continue
+
+    results.sort(key=lambda x: x[1])
+    return results
 
 
 # ── Core helpers ──────────────────────────────────────────

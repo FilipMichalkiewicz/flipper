@@ -658,6 +658,7 @@ from scanner import (
     remove_proxy, get_current_proxy, rotate_proxy, report_proxy_fail,
     report_proxy_success, should_remove_proxy, make_cookies, make_params,
     random_user_agent, _request_get, count_channels_quick,
+    test_proxy_latency, test_and_filter_proxies,
 )
 from constants import RESULTS_FILE, SESSION_FILE
 
@@ -854,6 +855,8 @@ class App:
         self.debug_console_var = tk.BooleanVar(value=bool(_EARLY_DEBUG_ENABLED))
         self.use_proxy_var = tk.BooleanVar(value=True)
         self.player_use_proxy_var = tk.BooleanVar(value=True)
+        self.max_proxy_latency = 4.0   # default max latency in seconds
+        self._proxy_latencies = {}     # {proxy_str: latency_float}
         self.min_channels = 0
         self.save_folder = _get_flipper_data_dir()
 
@@ -1030,7 +1033,7 @@ class App:
         self._lbl(left, "Pierwsze 3 bajty MAC")
         self.mac_entry = self._entry(left, "00:1B:79")
 
-        self._lbl(left, "Proxy (opcjonalnie)")
+        self._lbl(left, "Proxy (wpisz aby nadpisać auto-proxy)")
         self.proxy_inline_entry = self._entry(left)
 
         self._lbl(left, "Ilość procesów")
@@ -1060,12 +1063,10 @@ class App:
                        command=self._toggle_keep_on_top).pack(
             side=tk.LEFT, padx=(6, 0))
 
-        tk.Checkbutton(cb_frame, text="Proxy",
-                       variable=self.use_proxy_var, bg=BG_SIDEBAR,
-                       fg="#aaaaaa", selectcolor=BG_INPUT,
-                       activebackground=BG_SIDEBAR,
-                       activeforeground="#cccccc",
-                       font=("Helvetica", 10)).pack(
+        # Proxy info label (scanning is always via proxy)
+        tk.Label(cb_frame, text="🔒 Proxy",
+                 font=("Helvetica", 10, "bold"),
+                 bg=BG_SIDEBAR, fg="#55aaff").pack(
             side=tk.LEFT, padx=(6, 0))
 
         # Min channels filter
@@ -1298,7 +1299,7 @@ class App:
         top = tk.Frame(page, bg=BG_DARK)
         top.pack(fill=tk.X, pady=(4, 4))
 
-        self._make_btn(top, "🔄 Pobierz z API", ACCENT, "#1d4ed8",
+        self._make_btn(top, "🔄 Pobierz i testuj proxy", ACCENT, "#1d4ed8",
                        self._fetch_proxies).pack(
             side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
         self._make_btn(top, "🗑 Wyczyść listę", "#cc3333", "#aa2222",
@@ -1322,14 +1323,43 @@ class App:
             bg=BG_DARK, fg=FG_DIM)
         self.proxy_count_label.pack(side=tk.RIGHT, padx=8)
 
+        # Max latency row
+        latency_frame = tk.Frame(page, bg=BG_DARK)
+        latency_frame.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(latency_frame, text="⏱ Maks. opóźnienie proxy (s):",
+                 font=("Helvetica", 11, "bold"),
+                 bg=BG_DARK, fg="#c8c8e0").pack(side=tk.LEFT, padx=(4, 4))
+        self.max_latency_entry = tk.Entry(
+            latency_frame, font=("Helvetica", 11), width=6,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.max_latency_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=2)
+        self.max_latency_entry.insert(0, str(self.max_proxy_latency))
+        tk.Label(latency_frame,
+                 text="Proxy z wyższym opóźnieniem zostaną odrzucone",
+                 font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM).pack(
+            side=tk.LEFT, padx=(6, 0))
+        self._make_btn(latency_frame, "🔍 Testuj obecne", "#c78d00", "#a87600",
+                       self._retest_current_proxies).pack(
+            side=tk.RIGHT, padx=(4, 4), ipady=2, ipadx=6)
+
+        # Proxy test progress label
+        self.proxy_test_progress_label = tk.Label(
+            page, text="", font=("Helvetica", 10),
+            bg=BG_DARK, fg="#55aaff")
+        self.proxy_test_progress_label.pack(fill=tk.X, padx=4)
+
         tf = tk.Frame(page, bg=BG_DARK)
         tf.pack(fill=tk.BOTH, expand=True)
         self.proxy_tree = ttk.Treeview(
-            tf, columns=("proxy", "status"), show="headings")
+            tf, columns=("proxy", "latency", "status"), show="headings")
         self.proxy_tree.heading("proxy", text="Adres proxy")
+        self.proxy_tree.heading("latency", text="Opóźnienie")
         self.proxy_tree.heading("status", text="Status")
-        self.proxy_tree.column("proxy", width=400, minwidth=200)
-        self.proxy_tree.column("status", width=120, minwidth=80)
+        self.proxy_tree.column("proxy", width=350, minwidth=200)
+        self.proxy_tree.column("latency", width=100, minwidth=60)
+        self.proxy_tree.column("status", width=100, minwidth=60)
         psb = ttk.Scrollbar(tf, orient=tk.VERTICAL,
                             command=self.proxy_tree.yview)
         self.proxy_tree.configure(yscrollcommand=psb.set)
@@ -1674,19 +1704,18 @@ class App:
 
         self._sep_dark(page)
 
-        # Use proxy checkbox
+        # Proxy info section (proxy-only mode)
         proxy_cb_frame = tk.Frame(page, bg=BG_DARK)
         proxy_cb_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
-        tk.Checkbutton(proxy_cb_frame,
-                       text="Używaj proxy podczas skanowania",
-                       variable=self.use_proxy_var, bg=BG_DARK,
-                       fg="#d0d0e8", selectcolor=BG_INPUT,
-                       activebackground=BG_DARK,
-                       activeforeground="#ffffff",
-                       font=("Helvetica", 12)).pack(anchor=tk.W)
         tk.Label(proxy_cb_frame,
-                 text="Gdy wyłączone, skaner łączy się bezpośrednio "
-                      "bez proxy. Timeout automatycznie usuwa proxy.",
+                 text="🔒 Skanowanie TYLKO przez proxy",
+                 bg=BG_DARK, fg="#55aaff",
+                 font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        tk.Label(proxy_cb_frame,
+                 text="Skaner zawsze używa proxy. Przed skanowaniem "
+                      "proxy są automatycznie pobierane i testowane. "
+                      "Wolne proxy (powyżej ustawionego limitu opóźnienia) "
+                      "są automatycznie usuwane.",
                  font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
                  wraplength=600, anchor=tk.W, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(2, 0))
@@ -2120,6 +2149,7 @@ class App:
             "use_proxy": self.use_proxy_var.get(),
             "player_use_proxy": self.player_use_proxy_var.get(),
             "min_channels": self.min_channels_entry.get(),
+            "max_proxy_latency": self._get_max_latency(),
         }
         try:
             save_path = (os.path.join(self.save_folder, SESSION_FILE)
@@ -2209,6 +2239,11 @@ class App:
         if "min_channels" in data:
             self.min_channels_entry.delete(0, tk.END)
             self.min_channels_entry.insert(0, data["min_channels"])
+        if "max_proxy_latency" in data:
+            self.max_proxy_latency = float(data["max_proxy_latency"])
+            if hasattr(self, 'max_latency_entry'):
+                self.max_latency_entry.delete(0, tk.END)
+                self.max_latency_entry.insert(0, str(self.max_proxy_latency))
         saved_folder = data.get("save_folder", "")
         if saved_folder:
             self.save_folder = saved_folder
@@ -2221,8 +2256,7 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _get_active_proxy(self):
-        if not self.use_proxy_var.get():
-            return None
+        """Always returns a proxy — scanning is proxy-only."""
         inline = self.proxy_inline_entry.get().strip()
         if inline:
             if not inline.startswith("http"):
@@ -2232,6 +2266,17 @@ class App:
 
     def _get_proxy_for_mac(self, mac):
         return self.mac_proxy_map.get(mac)
+
+    def _get_max_latency(self) -> float:
+        """Read max proxy latency from the entry widget."""
+        try:
+            val = float(self.max_latency_entry.get().strip())
+            if val > 0:
+                self.max_proxy_latency = val
+                return val
+        except (ValueError, AttributeError):
+            pass
+        return self.max_proxy_latency
 
     def _auto_fetch_proxies_on_startup(self):
         if not get_proxy_list():
@@ -2243,27 +2288,112 @@ class App:
                       "info")
 
     def _fetch_proxies(self):
-        self._log("Pobieranie listy proxy z API...", "info")
-        self._set_progress(20, "Pobieranie proxy...")
+        self._log("Pobieranie listy proxy z API i testowanie...", "info")
+        self._set_progress(10, "Pobieranie proxy...")
         threading.Thread(target=self._fetch_proxies_worker,
                          daemon=True).start()
 
     def _fetch_proxies_worker(self):
+        max_lat = self._get_max_latency()
+        self._log_safe(f"Pobieranie proxy z API (maks. opóźnienie: {max_lat}s)...", "info")
+
         proxies = fetch_free_proxies()
-        if proxies:
-            set_proxy_list(proxies)
-            self._log_safe(f"Pobrano {len(proxies)} proxy.", "success")
-            self.root.after(0, self._refresh_proxy_tree)
-            self._set_progress(100, f"Pobrano {len(proxies)} proxy")
-        else:
+        if not proxies:
             self._log_safe("Nie udało się pobrać proxy.", "error")
             self._set_progress(100, "Błąd pobierania proxy")
+            return
+
+        self._log_safe(f"Pobrano {len(proxies)} proxy. Testowanie opóźnień...", "info")
+        self._set_progress(30, f"Testowanie {len(proxies)} proxy...")
+        self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+            text=f"Testowanie 0/{len(proxies)} proxy..."))
+
+        def _progress_cb(tested, total, proxy, latency):
+            pct = int(30 + (tested / total) * 60)
+            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
+            self._set_progress(pct, f"Test proxy {tested}/{total}")
+            self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+                text=f"Testowanie {tested}/{total} — {proxy} → {lat_str}"))
+
+        good_proxies = test_and_filter_proxies(
+            proxies, max_latency=max_lat, callback=_progress_cb)
+
+        if good_proxies:
+            proxy_list = [p for p, _ in good_proxies]
+            set_proxy_list(proxy_list)
+            # Store latency info for display
+            self._proxy_latencies = {p: lat for p, lat in good_proxies}
+            self._log_safe(
+                f"✅ {len(good_proxies)}/{len(proxies)} proxy OK "
+                f"(opóźnienie ≤ {max_lat}s). "
+                f"Najszybsze: {good_proxies[0][1]:.2f}s",
+                "success")
+            self.root.after(0, self._refresh_proxy_tree)
+            self._set_progress(100, f"{len(good_proxies)} proxy gotowych")
+        else:
+            self._log_safe(
+                f"❌ Żadne proxy nie spełnia limitu {max_lat}s!", "error")
+            set_proxy_list([])
+            self._proxy_latencies = {}
+            self.root.after(0, self._refresh_proxy_tree)
+            self._set_progress(100, "Brak dobrych proxy")
+
+        self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
+
+    def _retest_current_proxies(self):
+        """Re-test currently loaded proxies and remove slow ones."""
+        proxies = get_proxy_list()
+        if not proxies:
+            self._log("Brak proxy do przetestowania.", "warning")
+            return
+        self._log(f"Ponowne testowanie {len(proxies)} proxy...", "info")
+        threading.Thread(target=self._retest_proxies_worker,
+                         daemon=True).start()
+
+    def _retest_proxies_worker(self):
+        max_lat = self._get_max_latency()
+        proxies = get_proxy_list()
+        total = len(proxies)
+        self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+            text=f"Retestowanie 0/{total} proxy..."))
+        self._set_progress(10, f"Retestowanie {total} proxy...")
+
+        def _progress_cb(tested, total_p, proxy, latency):
+            pct = int(10 + (tested / total_p) * 80)
+            lat_str = f"{latency:.2f}s" if latency != float('inf') else "timeout"
+            self._set_progress(pct, f"Retest {tested}/{total_p}")
+            self.root.after(0, lambda: self.proxy_test_progress_label.configure(
+                text=f"Retestowanie {tested}/{total_p} — {proxy} → {lat_str}"))
+
+        good_proxies = test_and_filter_proxies(
+            proxies, max_latency=max_lat, callback=_progress_cb)
+
+        removed = total - len(good_proxies)
+        if good_proxies:
+            proxy_list = [p for p, _ in good_proxies]
+            set_proxy_list(proxy_list)
+            self._proxy_latencies = {p: lat for p, lat in good_proxies}
+            self._log_safe(
+                f"Retest: {len(good_proxies)}/{total} OK, "
+                f"usunięto {removed} wolnych proxy.", "success")
+        else:
+            set_proxy_list([])
+            self._proxy_latencies = {}
+            self._log_safe(f"Retest: wszystkie {total} proxy za wolne!", "error")
+
+        self.root.after(0, self._refresh_proxy_tree)
+        self._set_progress(100, f"{len(good_proxies)} proxy po reteście")
+        self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
 
     def _refresh_proxy_tree(self):
         for item in self.proxy_tree.get_children():
             self.proxy_tree.delete(item)
+        latencies = getattr(self, '_proxy_latencies', {})
         for p in get_proxy_list():
-            self.proxy_tree.insert("", tk.END, values=(p, "OK"))
+            lat = latencies.get(p)
+            lat_str = f"{lat:.2f}s" if lat is not None else "?"
+            status = "OK" if lat is not None and lat != float('inf') else "?"
+            self.proxy_tree.insert("", tk.END, values=(p, lat_str, status))
         self.proxy_count_label.configure(
             text=f"Proxy: {len(get_proxy_list())}")
 
@@ -2317,9 +2447,18 @@ class App:
 
     def _find_endpoint_with_proxy_retry(self, server_address, timeout):
         """Try to find a responding endpoint, cycling through all proxies.
+        Proxy-only: will NOT fall back to direct connection.
         Returns (endpoint, proxy_used) or (None, None).
         """
         proxy = self._get_active_proxy()
+
+        if not proxy:
+            # No proxy available — cannot scan without proxy
+            self._log_safe(
+                "❌ Brak proxy! Skanowanie wymaga proxy. "
+                "Pobierz proxy w zakładce Proxy.", "error")
+            return None, None
+
         endpoint, ep_code = get_responding_endpoint(
             server_address, timeout=timeout, proxy=proxy)
 
@@ -2347,15 +2486,9 @@ class App:
             if endpoint:
                 return endpoint, proxy
 
-        # Last resort: try without proxy
-        self._log_safe("Próba bez proxy...", "warning")
-        endpoint, ep_code = get_responding_endpoint(
-            server_address, timeout=timeout, proxy=None)
-        if endpoint:
-            return endpoint, None
-
         self._log_safe(
-            f"Serwer nie odpowiada (HTTP {ep_code})!", "error")
+            f"❌ Serwer nie odpowiada przez żadne proxy (HTTP {ep_code})! "
+            f"Pobierz nowe proxy.", "error")
         return None, None
 
     # ══════════════════════════════════════════════════════
@@ -3363,7 +3496,28 @@ class App:
         self.scan_thread.start()
 
     def _scan_worker(self, server_address, mac_prefix, workers, timeout):
-        self._log_safe(f"Szukam endpoint-u na {server_address}...", "info")
+        # Pre-scan: ensure proxies are available
+        if not get_proxy_list():
+            self._log_safe("Brak proxy — automatyczne pobieranie i testowanie...", "info")
+            self._set_status("Pobieranie proxy...", "#55aaff")
+            self._set_progress(5, "Pobieranie proxy...")
+            self._fetch_proxies_worker()
+
+            if self.stop_event.is_set():
+                self._scan_finished()
+                return
+
+            if not get_proxy_list():
+                self._log_safe(
+                    "❌ Nie udało się pobrać proxy. Skanowanie wymaga proxy!",
+                    "error")
+                self._set_progress(100, "Brak proxy")
+                self._scan_finished()
+                return
+
+        self._log_safe(
+            f"Szukam endpoint-u na {server_address} "
+            f"(proxy: {len(get_proxy_list())})...", "info")
         self._set_status("Szukanie endpoint-u...", "#55aaff")
         self._set_progress(15, "Szukanie endpoint-u...")
 
