@@ -16,6 +16,8 @@ import ctypes
 import traceback
 import zipfile
 import urllib.request
+import urllib.error
+import base64
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional
@@ -35,16 +37,129 @@ def _read_debug_console_flag() -> bool:
     try:
         import json as _json
 
+        candidate_paths = []
+        if sys.platform == "win32":
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                candidate_paths.append(os.path.join(appdata, "Flipper", "session.json"))
         desktop = os.path.join(str(Path.home()), "Desktop")
-        data_dir = os.path.join(desktop, "flipper-config")
-        session_path = os.path.join(data_dir, "session.json")
-        if os.path.isfile(session_path):
-            with open(session_path, "r", encoding="utf-8") as f:
-                data = _json.load(f)
-            return bool(data.get("debug_console", False))
+        candidate_paths.append(os.path.join(desktop, "flipper-config", "session.json"))
+
+        for session_path in candidate_paths:
+            if os.path.isfile(session_path):
+                with open(session_path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                return bool(data.get("debug_console", False))
     except Exception:
         return False
     return False
+
+
+def _dpapi_protect_bytes(raw: bytes) -> Optional[bytes]:
+    if sys.platform != "win32" or not raw:
+        return None
+    try:
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbData", ctypes.c_uint32),
+                ("pbData", ctypes.POINTER(ctypes.c_char)),
+            ]
+
+        data_buf = ctypes.create_string_buffer(raw, len(raw))
+        entropy = b"FlipperPATv1"
+        entropy_buf = ctypes.create_string_buffer(entropy, len(entropy))
+
+        in_blob = DATA_BLOB(len(raw), ctypes.cast(data_buf, ctypes.POINTER(ctypes.c_char)))
+        ent_blob = DATA_BLOB(len(entropy), ctypes.cast(entropy_buf, ctypes.POINTER(ctypes.c_char)))
+        out_blob = DATA_BLOB()
+
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            None,
+            ctypes.byref(ent_blob),
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            return None
+        out = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return out
+    except Exception:
+        return None
+
+
+def _dpapi_unprotect_bytes(raw: bytes) -> Optional[bytes]:
+    if sys.platform != "win32" or not raw:
+        return None
+    try:
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbData", ctypes.c_uint32),
+                ("pbData", ctypes.POINTER(ctypes.c_char)),
+            ]
+
+        data_buf = ctypes.create_string_buffer(raw, len(raw))
+        entropy = b"FlipperPATv1"
+        entropy_buf = ctypes.create_string_buffer(entropy, len(entropy))
+
+        in_blob = DATA_BLOB(len(raw), ctypes.cast(data_buf, ctypes.POINTER(ctypes.c_char)))
+        ent_blob = DATA_BLOB(len(entropy), ctypes.cast(entropy_buf, ctypes.POINTER(ctypes.c_char)))
+        out_blob = DATA_BLOB()
+
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None,
+            ctypes.byref(ent_blob),
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            return None
+        out = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return out
+    except Exception:
+        return None
+
+
+def _encrypt_secret(plain: str) -> str:
+    if not plain:
+        return ""
+    raw = plain.encode("utf-8")
+    protected = _dpapi_protect_bytes(raw)
+    if protected is not None:
+        return "dpapi:" + base64.b64encode(protected).decode("ascii")
+
+    key = (os.environ.get("USERNAME", "") + "|" + platform.node()).encode("utf-8")
+    if not key:
+        key = b"flipper"
+    obf = bytes([b ^ key[i % len(key)] for i, b in enumerate(raw)])
+    return "xor:" + base64.b64encode(obf).decode("ascii")
+
+
+def _decrypt_secret(cipher: str) -> str:
+    if not cipher:
+        return ""
+    try:
+        if cipher.startswith("dpapi:"):
+            payload = base64.b64decode(cipher[6:].encode("ascii"))
+            plain = _dpapi_unprotect_bytes(payload)
+            return plain.decode("utf-8", errors="ignore") if plain else ""
+        if cipher.startswith("xor:"):
+            payload = base64.b64decode(cipher[4:].encode("ascii"))
+            key = (os.environ.get("USERNAME", "") + "|" + platform.node()).encode("utf-8")
+            if not key:
+                key = b"flipper"
+            raw = bytes([b ^ key[i % len(key)] for i, b in enumerate(payload)])
+            return raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return ""
 
 
 def _enable_windows_console() -> None:
@@ -98,12 +213,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def _get_flipper_data_dir() -> str:
-    desktop = os.path.join(str(Path.home()), "Desktop")
-    path = os.path.join(desktop, "flipper-config")
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            path = os.path.join(appdata, "Flipper")
+        else:
+            path = os.path.join(str(Path.home()), "AppData", "Roaming", "Flipper")
+    else:
+        desktop = os.path.join(str(Path.home()), "Desktop")
+        path = os.path.join(desktop, "flipper-config")
     os.makedirs(path, exist_ok=True)
 
-    # One-time best-effort migration from legacy Windows location:
-    # %LOCALAPPDATA%\Flipper -> Desktop\flipper-config
+    # One-time best-effort migration from legacy Windows locations:
+    # %LOCALAPPDATA%\Flipper and Desktop\flipper-config -> %APPDATA%\Flipper
     if sys.platform == "win32":
         try:
             legacy_base = os.environ.get("LOCALAPPDATA")
@@ -111,6 +233,9 @@ def _get_flipper_data_dir() -> str:
                 legacy_path = os.path.join(legacy_base, "Flipper")
                 if os.path.isdir(legacy_path):
                     _migrate_legacy_flipper_data(legacy_path, path)
+            old_desktop_path = os.path.join(str(Path.home()), "Desktop", "flipper-config")
+            if os.path.isdir(old_desktop_path):
+                _migrate_legacy_flipper_data(old_desktop_path, path)
         except Exception:
             pass
 
@@ -810,7 +935,8 @@ FG_DIM = "#888888"
 ACCENT = "#2563eb"
 MAX_PROXY_RETRIES = 15
 PROXY_TEST_BATCH_SIZE = 5
-AUTO_UPDATE_ZIP_URL = "https://github.com/FilipMichalkiewicz/flipper/archive/refs/heads/main.zip"
+DEFAULT_UPDATE_REPO = "FilipMichalkiewicz/flipper"
+DEFAULT_UPDATE_BRANCH = "main"
 
 
 class App:
@@ -864,6 +990,9 @@ class App:
         self._proxy_latencies = {}     # {proxy_str: latency_float}
         self.min_channels = 0
         self.save_folder = _get_flipper_data_dir()
+        self.update_repo = DEFAULT_UPDATE_REPO
+        self.update_branch = DEFAULT_UPDATE_BRANCH
+        self.github_token = ""
 
         # Account info
         self.account_info_text = ""
@@ -1777,15 +1906,53 @@ class App:
         # Auto-update section (Windows)
         update_frame = tk.Frame(page, bg=BG_DARK)
         update_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
+        form = tk.Frame(update_frame, bg=BG_DARK)
+        form.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(form, text="Repo:", font=("Helvetica", 11, "bold"),
+                 bg=BG_DARK, fg="#d0d0e8").grid(row=0, column=0, sticky="w")
+        self.update_repo_entry = tk.Entry(
+            form, font=("Helvetica", 11), width=38,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.update_repo_entry.grid(row=0, column=1, sticky="we", padx=(6, 12), ipady=2)
+        self.update_repo_entry.insert(0, self.update_repo)
+
+        tk.Label(form, text="Branch:", font=("Helvetica", 11, "bold"),
+                 bg=BG_DARK, fg="#d0d0e8").grid(row=0, column=2, sticky="w")
+        self.update_branch_entry = tk.Entry(
+            form, font=("Helvetica", 11), width=12,
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355")
+        self.update_branch_entry.grid(row=0, column=3, sticky="we", padx=(6, 0), ipady=2)
+        self.update_branch_entry.insert(0, self.update_branch)
+
+        tk.Label(form, text="GitHub token:", font=("Helvetica", 11, "bold"),
+                 bg=BG_DARK, fg="#d0d0e8").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.github_token_entry = tk.Entry(
+            form, font=("Helvetica", 11),
+            bg=BG_INPUT, fg="#e0e0e0", insertbackground="#ffffff",
+            relief="flat", highlightthickness=1,
+            highlightcolor=ACCENT, highlightbackground="#333355",
+            show="*")
+        self.github_token_entry.grid(row=1, column=1, columnspan=3, sticky="we", padx=(6, 0), pady=(6, 0), ipady=2)
+        if self.github_token:
+            self.github_token_entry.insert(0, self.github_token)
+
+        form.grid_columnconfigure(1, weight=1)
+        form.grid_columnconfigure(3, weight=0)
+
         self._make_btn(update_frame, "⬇️ Auto aktualizacja (GitHub)",
                        ACCENT, "#1d4ed8",
                        self._auto_update_from_github).pack(
             anchor=tk.W, ipady=3, ipadx=6)
         tk.Label(update_frame,
                  text=(
-                     "Windows: pobiera ZIP z GitHuba na Pulpit, "
-                     "rozpakowuje, uruchamia build_windows.bat i po buildzie "
-                     "usuwa flipper-main oraz ZIP."
+                     "Windows: prywatny update wymaga tokena (read-only). "
+                     "Pobiera ZIP z GitHuba na Pulpit, rozpakowuje, uruchamia "
+                     "build_windows.bat i po buildzie usuwa folder źródłowy oraz ZIP."
                  ),
                  font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM,
                  wraplength=700, anchor=tk.W, justify=tk.LEFT).pack(
@@ -1841,32 +2008,75 @@ class App:
         if sys.platform != "win32":
             self._log("Auto aktualizacja jest dostępna tylko na Windows.", "warning")
             return
+        repo = (self.update_repo_entry.get().strip()
+                if hasattr(self, 'update_repo_entry') else self.update_repo)
+        token = (self.github_token_entry.get().strip()
+                 if hasattr(self, 'github_token_entry') else self.github_token)
+        if not repo or "/" not in repo:
+            self._log("Podaj repo w formacie owner/repo.", "error")
+            return
+        if not token:
+            self._log("To repo prywatne: podaj GitHub token (read-only).", "error")
+            return
         self._log("Start auto aktualizacji z GitHuba...", "info")
         self._set_progress(5, "Auto aktualizacja...")
         threading.Thread(target=self._auto_update_worker, daemon=True).start()
 
+    def _get_update_zip_url(self) -> str:
+        repo = (self.update_repo_entry.get().strip()
+                if hasattr(self, 'update_repo_entry') else self.update_repo)
+        branch = (self.update_branch_entry.get().strip()
+                  if hasattr(self, 'update_branch_entry') else self.update_branch)
+        if not branch:
+            branch = DEFAULT_UPDATE_BRANCH
+        self.update_repo = repo or DEFAULT_UPDATE_REPO
+        self.update_branch = branch
+        return f"https://api.github.com/repos/{self.update_repo}/zipball/{self.update_branch}"
+
     def _auto_update_worker(self):
         desktop = Path.home() / "Desktop"
         zip_path = desktop / "flipper-main.zip"
-        extract_dir = desktop / "flipper-main"
         runner_bat = desktop / "flipper_update_runner.bat"
+        extract_dir = None
 
         try:
             self._set_progress(15, "Pobieranie ZIP...")
-            self._log_safe(f"Pobieram: {AUTO_UPDATE_ZIP_URL}", "info")
+            zip_url = self._get_update_zip_url()
+            token = (self.github_token_entry.get().strip()
+                     if hasattr(self, 'github_token_entry') else self.github_token)
+            self.github_token = token
+            self._log_safe(f"Pobieram: {zip_url}", "info")
 
             if zip_path.exists():
                 zip_path.unlink(missing_ok=True)
-            if extract_dir.exists():
-                shutil.rmtree(extract_dir, ignore_errors=True)
 
-            with urllib.request.urlopen(AUTO_UPDATE_ZIP_URL, timeout=40) as resp:
+            req = urllib.request.Request(
+                zip_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "Flipper-Updater",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 with open(zip_path, "wb") as out:
                     out.write(resp.read())
 
             self._set_progress(35, "Rozpakowywanie ZIP...")
             with zipfile.ZipFile(zip_path, "r") as zf:
+                top_dirs = []
+                for member in zf.namelist():
+                    parts = member.split("/")
+                    if parts and parts[0]:
+                        top_dirs.append(parts[0])
                 zf.extractall(desktop)
+
+            if top_dirs:
+                extract_dir = desktop / top_dirs[0]
+            else:
+                self._log_safe("Błąd paczki ZIP: brak katalogu źródłowego.", "error")
+                self._set_progress(100, "Błąd aktualizacji")
+                return
 
             build_bat = extract_dir / "build_windows.bat"
             if not build_bat.exists():
@@ -1881,8 +2091,8 @@ class App:
                 f"cd /d \"{extract_dir}\"\n"
                 "call build_windows.bat\n"
                 f"cd /d \"{desktop}\"\n"
-                "rmdir /s /q \"flipper-main\"\n"
-                "del /f /q \"flipper-main.zip\"\n"
+                f"rmdir /s /q \"{extract_dir.name}\"\n"
+                f"del /f /q \"{zip_path.name}\"\n"
                 "del /f /q \"%~f0\"\n"
                 "endlocal\n"
             )
@@ -1902,6 +2112,14 @@ class App:
             self._set_progress(100, "Aktualizacja uruchomiona")
             self.root.after(500, self.root.destroy)
 
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                self._log_safe("GitHub auth failed (401/403). Sprawdź token i uprawnienia.", "error")
+            elif e.code == 404:
+                self._log_safe("Repo/branch nie istnieje lub brak dostępu (404).", "error")
+            else:
+                self._log_safe(f"HTTP error podczas aktualizacji: {e.code}", "error")
+            self._set_progress(100, "Błąd aktualizacji")
         except Exception as e:
             self._log_safe(f"Błąd auto aktualizacji: {e}", "error")
             self._set_progress(100, "Błąd aktualizacji")
@@ -2221,6 +2439,9 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _save_session(self):
+        token_plain = (self.github_token_entry.get().strip()
+                       if hasattr(self, 'github_token_entry')
+                       else self.github_token)
         data = {
             "url": self.url_entry.get(),
             "mac_prefix": self.mac_entry.get(),
@@ -2243,6 +2464,13 @@ class App:
             "player_use_proxy": self.player_use_proxy_var.get(),
             "min_channels": self.min_channels_entry.get(),
             "max_proxy_latency": self._get_max_latency(),
+            "update_repo": (self.update_repo_entry.get().strip()
+                             if hasattr(self, 'update_repo_entry')
+                             else self.update_repo),
+            "update_branch": (self.update_branch_entry.get().strip()
+                               if hasattr(self, 'update_branch_entry')
+                               else self.update_branch),
+            "github_token_enc": _encrypt_secret(token_plain),
         }
         try:
             save_path = (os.path.join(self.save_folder, SESSION_FILE)
@@ -2337,6 +2565,28 @@ class App:
             if hasattr(self, 'max_latency_entry'):
                 self.max_latency_entry.delete(0, tk.END)
                 self.max_latency_entry.insert(0, str(self.max_proxy_latency))
+        if "update_repo" in data:
+            self.update_repo = data.get("update_repo") or DEFAULT_UPDATE_REPO
+            if hasattr(self, 'update_repo_entry'):
+                self.update_repo_entry.delete(0, tk.END)
+                self.update_repo_entry.insert(0, self.update_repo)
+        if "update_branch" in data:
+            self.update_branch = data.get("update_branch") or DEFAULT_UPDATE_BRANCH
+            if hasattr(self, 'update_branch_entry'):
+                self.update_branch_entry.delete(0, tk.END)
+                self.update_branch_entry.insert(0, self.update_branch)
+        token_loaded = ""
+        if "github_token_enc" in data:
+            token_loaded = _decrypt_secret(data.get("github_token_enc") or "")
+        elif "github_token" in data:
+            # Backward compatibility with old plaintext sessions
+            token_loaded = data.get("github_token") or ""
+
+        if token_loaded:
+            self.github_token = token_loaded
+            if hasattr(self, 'github_token_entry'):
+                self.github_token_entry.delete(0, tk.END)
+                self.github_token_entry.insert(0, self.github_token)
         saved_folder = data.get("save_folder", "")
         if saved_folder:
             self.save_folder = saved_folder
