@@ -927,6 +927,7 @@ def _diagnose_mpv_availability():
 MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
 CHANNELS_CACHE_FILE = "channels_cache.json"
+APP_VERSION = "1.0.0"
 BG_DARK = "#0a0a1e"
 BG_SIDEBAR = "#1a1a2e"
 BG_INPUT = "#12122a"
@@ -1047,6 +1048,10 @@ class App:
         
         self._load_session()
         self._auto_fetch_proxies_on_startup()
+
+        # Check for updates on startup (background, silent)
+        if sys.platform == "win32":
+            threading.Thread(target=self._check_version_on_startup, daemon=True).start()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2004,6 +2009,37 @@ class App:
             os.remove(path)
         self._log("Cache kanałów wyczyszczony.", "info")
 
+    def _check_version_on_startup(self):
+        """Check version.txt on GitHub and auto-update if different."""
+        try:
+            token = self.github_token
+            if not token:
+                return
+            ver_url = (f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}"
+                       f"/contents/version.txt?ref={DEFAULT_UPDATE_BRANCH}")
+            req = urllib.request.Request(
+                ver_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github.v3.raw",
+                    "User-Agent": "Flipper-Updater",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                remote_version = resp.read().decode("utf-8").strip()
+
+            local_version = APP_VERSION
+            if remote_version and remote_version != local_version:
+                self._log_safe(
+                    f"Nowa wersja dostępna: {remote_version} (obecna: {local_version}). Aktualizuję...",
+                    "warning",
+                )
+                self.root.after(0, self._auto_update_from_github)
+            else:
+                self._log_safe(f"Wersja aktualna: {local_version}", "dim")
+        except Exception:
+            pass
+
     def _auto_update_from_github(self):
         if sys.platform != "win32":
             self._log("Auto aktualizacja jest dostępna tylko na Windows.", "warning")
@@ -2049,6 +2085,15 @@ class App:
                 with open(zip_path, "wb") as out:
                     out.write(resp.read())
 
+            # Hide ZIP on Windows
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(["attrib", "+h", str(zip_path)],
+                                   creationflags=subprocess.CREATE_NO_WINDOW,
+                                   timeout=5)
+                except Exception:
+                    pass
+
             self._set_progress(35, "Rozpakowywanie ZIP...")
             with zipfile.ZipFile(zip_path, "r") as zf:
                 top_dirs = []
@@ -2060,6 +2105,14 @@ class App:
 
             if top_dirs:
                 extract_dir = desktop / top_dirs[0]
+                # Hide extracted folder on Windows
+                if sys.platform == "win32":
+                    try:
+                        subprocess.run(["attrib", "+h", str(extract_dir)],
+                                       creationflags=subprocess.CREATE_NO_WINDOW,
+                                       timeout=5)
+                    except Exception:
+                        pass
             else:
                 self._log_safe("Błąd paczki ZIP: brak katalogu źródłowego.", "error")
                 self._set_progress(100, "Błąd aktualizacji")
@@ -3527,6 +3580,7 @@ class App:
                 input_default_bindings=True,
                 input_vo_keyboard=True,
                 osc=True,
+                ytdl=False,
                 log_handler=self._mpv_log_handler,
                 loglevel='info',
             )
@@ -3540,6 +3594,7 @@ class App:
                     input_default_bindings=True,
                     input_vo_keyboard=True,
                     osc=True,
+                    ytdl=False,
                     log_handler=self._mpv_log_handler,
                     loglevel='info',
                 )
@@ -3552,7 +3607,15 @@ class App:
     def _mpv_log_handler(self, loglevel, component, message):
         """Capture mpv internal log messages."""
         try:
+            # Suppress ytdl_hook noise (ytdl is disabled but just in case)
+            if component in ("ytdl_hook", "ytdl_hook/") or "ytdl" in message.lower():
+                return
             if loglevel in ('error', 'fatal'):
+                # Detect HTTP 459 (IPTV server overload / token expired)
+                if "459" in message or "http error" in message.lower():
+                    self._log_safe(f"mpv [{component}]: {message} — resetuję token...", "warning")
+                    self.player_token = None  # Force re-handshake on next play
+                    return
                 self._log_safe(f"mpv [{component}]: {message}", "error")
             elif loglevel == 'warn':
                 self._log_safe(f"mpv [{component}]: {message}", "warning")
