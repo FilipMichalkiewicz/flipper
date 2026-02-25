@@ -2011,8 +2011,10 @@ class App:
 
     def _check_version_on_startup(self):
         """Check version.txt on GitHub and auto-update if different."""
+        import time as _time
+        _time.sleep(3)  # wait for session to load and UI to settle
         try:
-            token = self.github_token
+            token = self._get_github_token()
             if not token:
                 return
             ver_url = (f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}"
@@ -2040,12 +2042,23 @@ class App:
         except Exception:
             pass
 
+    def _get_github_token(self) -> str:
+        """Get GitHub token: prefer entry widget, fallback to self.github_token."""
+        token = ""
+        if hasattr(self, 'github_token_entry'):
+            try:
+                token = self.github_token_entry.get().strip()
+            except Exception:
+                pass
+        if not token:
+            token = self.github_token or ""
+        return token
+
     def _auto_update_from_github(self):
         if sys.platform != "win32":
             self._log("Auto aktualizacja jest dostępna tylko na Windows.", "warning")
             return
-        token = (self.github_token_entry.get().strip()
-                 if hasattr(self, 'github_token_entry') else self.github_token)
+        token = self._get_github_token()
         if not token:
             self._log("To repo prywatne: podaj GitHub token (read-only).", "error")
             return
@@ -2065,8 +2078,7 @@ class App:
         try:
             self._set_progress(15, "Pobieranie ZIP...")
             zip_url = self._get_update_zip_url()
-            token = (self.github_token_entry.get().strip()
-                     if hasattr(self, 'github_token_entry') else self.github_token)
+            token = self._get_github_token()
             self.github_token = token
             self._log_safe(f"Pobieram: {zip_url}", "info")
 
@@ -2479,9 +2491,7 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _save_session(self):
-        token_plain = (self.github_token_entry.get().strip()
-                       if hasattr(self, 'github_token_entry')
-                       else self.github_token)
+        token_plain = self._get_github_token()
         data = {
             "url": self.url_entry.get(),
             "mac_prefix": self.mac_entry.get(),
