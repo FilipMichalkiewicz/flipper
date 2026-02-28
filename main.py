@@ -3086,18 +3086,32 @@ class App:
                     if mac in existing:
                         continue
                     existing.add(mac)
-                    # Also try to extract URL from line (after | separator)
-                    parts = line.split("|")
+                    # Try to extract expiry and URL from line
+                    parts = [p.strip() for p in line.split("|")]
                     mac_url = url
+                    expiry = "imported"
+
+                    if len(parts) >= 2 and parts[1] and not parts[1].lower().startswith("http"):
+                        expiry = parts[1]
+
                     for p in parts[1:]:
-                        p = p.strip()
-                        if p.startswith("http"):
+                        if p.lower().startswith("http"):
                             mac_url = p
                             break
+
+                    if expiry == "imported":
+                        csv_parts = [p.strip() for p in line.split(",")]
+                        if len(csv_parts) >= 2 and csv_parts[1] and not csv_parts[1].lower().startswith("http"):
+                            expiry = csv_parts[1]
+                        for p in csv_parts[1:]:
+                            if p.lower().startswith("http"):
+                                mac_url = p
+                                break
+
                     self.active_macs.append({
                         "url": mac_url,
                         "mac": mac,
-                        "expiry": "imported",
+                        "expiry": expiry,
                         "channels": "?",
                         "proxy": "",
                     })
