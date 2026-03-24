@@ -1,9 +1,12 @@
 """
 Scanner module — portal API logic for MAC address scanning.
 Supports proxy rotation, HTTP status code reporting, VOD/Series content.
+Proxy tag system: untested / working / dead / rate-limited with persistence.
 """
 
 import hashlib
+import json as _json
+import os
 import time
 import requests
 import threading
@@ -15,12 +18,36 @@ from constants import USER_AGENTS, ENDPOINTS, MONTHS_PL
 # Status codes that indicate proxy should be removed
 PROXY_BAD_CODES = {403, 404, 407, 500, 501, 502, 503, 504}
 
+# ── Proxy tag constants ───────────────────────────────────
+PROXY_TAG_UNTESTED = "untested"
+PROXY_TAG_WORKING = "working"
+PROXY_TAG_DEAD = "dead"
+PROXY_TAG_RATE_LIMITED = "rate-limited"
+
+PROXY_TAG_COLORS = {
+    PROXY_TAG_UNTESTED: "#aaaaaa",  # grey
+    PROXY_TAG_WORKING: "#00ff88",  # green
+    PROXY_TAG_DEAD: "#ff4444",  # red
+    PROXY_TAG_RATE_LIMITED: "#ffaa00",  # orange/yellow
+}
+
+RATE_LIMIT_COOLDOWN_S = 3600  # 1 hour cooldown for rate-limited proxies
+
 # ── Shared proxy state ────────────────────────────────────
 _proxy_lock = threading.Lock()
 _proxy_list: List[str] = []
 _proxy_index: int = 0
 _proxy_fail_counts: Dict[str, int] = {}
 _PROXY_MAX_FAILS = 3
+
+# Proxy tags: {proxy_str: tag_str}
+_proxy_tags: Dict[str, str] = {}
+# Rate-limit timestamps: {proxy_str: unix_timestamp_of_429}
+_proxy_rate_limited_at: Dict[str, float] = {}
+# Test stats for deep testing: {proxy_str: {"checked": int, "found": int}}
+_proxy_test_stats: Dict[str, Dict[str, int]] = {}
+
+PROXY_STATE_FILE = "proxy_state.json"
 
 
 def set_proxy_list(proxies: List[str]):
@@ -29,6 +56,10 @@ def set_proxy_list(proxies: List[str]):
         _proxy_list = list(proxies)
         _proxy_index = 0
         _proxy_fail_counts = {}
+        # Tag new proxies as untested if they have no tag yet
+        for p in _proxy_list:
+            if p not in _proxy_tags:
+                _proxy_tags[p] = PROXY_TAG_UNTESTED
 
 
 def get_proxy_list() -> List[str]:
@@ -40,6 +71,8 @@ def add_proxy(proxy: str):
     with _proxy_lock:
         if proxy not in _proxy_list:
             _proxy_list.append(proxy)
+            if proxy not in _proxy_tags:
+                _proxy_tags[proxy] = PROXY_TAG_UNTESTED
 
 
 def remove_proxy(proxy: str):
@@ -50,13 +83,37 @@ def remove_proxy(proxy: str):
             if _proxy_index >= len(_proxy_list):
                 _proxy_index = 0
         _proxy_fail_counts.pop(proxy, None)
+        _proxy_tags.pop(proxy, None)
+        _proxy_rate_limited_at.pop(proxy, None)
+        _proxy_test_stats.pop(proxy, None)
 
 
 def get_current_proxy() -> Optional[str]:
+    """Return current proxy, skipping rate-limited ones still in cooldown."""
     with _proxy_lock:
         if not _proxy_list:
             return None
-        return _proxy_list[_proxy_index % len(_proxy_list)]
+        now = time.time()
+        total = len(_proxy_list)
+        for _ in range(total):
+            p = _proxy_list[_proxy_index % total]
+            tag = _proxy_tags.get(p, PROXY_TAG_UNTESTED)
+            if tag == PROXY_TAG_RATE_LIMITED:
+                limited_at = _proxy_rate_limited_at.get(p, 0)
+                if now - limited_at < RATE_LIMIT_COOLDOWN_S:
+                    # Still in cooldown, skip
+                    _proxy_index = (_proxy_index + 1) % total
+                    continue
+                else:
+                    # Cooldown expired, mark as untested for re-check
+                    _proxy_tags[p] = PROXY_TAG_UNTESTED
+                    _proxy_rate_limited_at.pop(p, None)
+            if tag == PROXY_TAG_DEAD:
+                _proxy_index = (_proxy_index + 1) % total
+                continue
+            return p
+        # All proxies are dead or rate-limited; return first anyway
+        return _proxy_list[_proxy_index % total]
 
 
 def rotate_proxy() -> Optional[str]:
@@ -64,7 +121,24 @@ def rotate_proxy() -> Optional[str]:
     with _proxy_lock:
         if not _proxy_list:
             return None
-        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+        now = time.time()
+        total = len(_proxy_list)
+        for _ in range(total):
+            _proxy_index = (_proxy_index + 1) % total
+            p = _proxy_list[_proxy_index]
+            tag = _proxy_tags.get(p, PROXY_TAG_UNTESTED)
+            if tag == PROXY_TAG_RATE_LIMITED:
+                limited_at = _proxy_rate_limited_at.get(p, 0)
+                if now - limited_at < RATE_LIMIT_COOLDOWN_S:
+                    continue
+                else:
+                    _proxy_tags[p] = PROXY_TAG_UNTESTED
+                    _proxy_rate_limited_at.pop(p, None)
+            if tag == PROXY_TAG_DEAD:
+                continue
+            return p
+        # Fallback
+        _proxy_index = (_proxy_index + 1) % total
         return _proxy_list[_proxy_index]
 
 
@@ -79,6 +153,9 @@ def report_proxy_fail(proxy: str) -> bool:
                 if _proxy_index >= len(_proxy_list) and _proxy_list:
                     _proxy_index = 0
                 _proxy_fail_counts.pop(proxy, None)
+                _proxy_tags.pop(proxy, None)
+                _proxy_rate_limited_at.pop(proxy, None)
+                _proxy_test_stats.pop(proxy, None)
                 return True
     return False
 
@@ -91,6 +168,159 @@ def report_proxy_success(proxy: str):
 def should_remove_proxy(status_code: int) -> bool:
     """Check if HTTP status code means proxy should be removed."""
     return status_code in PROXY_BAD_CODES
+
+
+# ── Proxy tag management ─────────────────────────────────
+
+
+def set_proxy_tag(proxy: str, tag: str):
+    """Set the tag for a proxy."""
+    with _proxy_lock:
+        _proxy_tags[proxy] = tag
+        if tag == PROXY_TAG_RATE_LIMITED:
+            _proxy_rate_limited_at[proxy] = time.time()
+
+
+def get_proxy_tag(proxy: str) -> str:
+    """Get the tag for a proxy."""
+    with _proxy_lock:
+        return _proxy_tags.get(proxy, PROXY_TAG_UNTESTED)
+
+
+def get_all_proxy_tags() -> Dict[str, str]:
+    """Return copy of all proxy tags."""
+    with _proxy_lock:
+        return dict(_proxy_tags)
+
+
+def get_proxy_rate_limited_at(proxy: str) -> float:
+    """Return the timestamp when the proxy was rate-limited, or 0."""
+    with _proxy_lock:
+        return _proxy_rate_limited_at.get(proxy, 0)
+
+
+def get_all_rate_limited_times() -> Dict[str, float]:
+    """Return copy of all rate-limit timestamps."""
+    with _proxy_lock:
+        return dict(_proxy_rate_limited_at)
+
+
+def mark_proxy_rate_limited(proxy: str):
+    """Mark proxy as rate-limited with current timestamp."""
+    with _proxy_lock:
+        _proxy_tags[proxy] = PROXY_TAG_RATE_LIMITED
+        _proxy_rate_limited_at[proxy] = time.time()
+
+
+def check_rate_limit_expired(proxy: str) -> bool:
+    """Check if a rate-limited proxy's cooldown has expired."""
+    with _proxy_lock:
+        if _proxy_tags.get(proxy) != PROXY_TAG_RATE_LIMITED:
+            return False
+        limited_at = _proxy_rate_limited_at.get(proxy, 0)
+        return (time.time() - limited_at) >= RATE_LIMIT_COOLDOWN_S
+
+
+def get_usable_proxy_count() -> int:
+    """Return count of proxies that are not dead or rate-limited in cooldown."""
+    with _proxy_lock:
+        now = time.time()
+        count = 0
+        for p in _proxy_list:
+            tag = _proxy_tags.get(p, PROXY_TAG_UNTESTED)
+            if tag == PROXY_TAG_DEAD:
+                continue
+            if tag == PROXY_TAG_RATE_LIMITED:
+                if now - _proxy_rate_limited_at.get(p, 0) < RATE_LIMIT_COOLDOWN_S:
+                    continue
+            count += 1
+        return count
+
+
+def get_proxy_for_multiproxy(exclude: set = None) -> Optional[str]:
+    """Get a unique proxy for multi-proxy mode. Skips dead, rate-limited,
+    and any proxies in the exclude set."""
+    with _proxy_lock:
+        now = time.time()
+        for p in _proxy_list:
+            if exclude and p in exclude:
+                continue
+            tag = _proxy_tags.get(p, PROXY_TAG_UNTESTED)
+            if tag == PROXY_TAG_DEAD:
+                continue
+            if tag == PROXY_TAG_RATE_LIMITED:
+                if now - _proxy_rate_limited_at.get(p, 0) < RATE_LIMIT_COOLDOWN_S:
+                    continue
+            return p
+        return None
+
+
+def init_proxy_test_stats(proxy: str):
+    """Initialize test stats for deep proxy testing."""
+    with _proxy_lock:
+        _proxy_test_stats[proxy] = {"checked": 0, "found": 0}
+
+
+def update_proxy_test_stats(proxy: str, found: bool):
+    """Update test stats. Returns (checked, found) tuple."""
+    with _proxy_lock:
+        if proxy not in _proxy_test_stats:
+            _proxy_test_stats[proxy] = {"checked": 0, "found": 0}
+        _proxy_test_stats[proxy]["checked"] += 1
+        if found:
+            _proxy_test_stats[proxy]["found"] += 1
+        return (_proxy_test_stats[proxy]["checked"], _proxy_test_stats[proxy]["found"])
+
+
+def get_proxy_test_stats(proxy: str) -> Tuple[int, int]:
+    """Return (checked, found) for a proxy."""
+    with _proxy_lock:
+        stats = _proxy_test_stats.get(proxy, {"checked": 0, "found": 0})
+        return (stats["checked"], stats["found"])
+
+
+# ── Proxy state persistence ──────────────────────────────
+
+
+def save_proxy_state(data_dir: str):
+    """Save proxy tags and rate-limit timestamps to proxy_state.json."""
+    with _proxy_lock:
+        state = {
+            "tags": dict(_proxy_tags),
+            "rate_limited_at": {k: v for k, v in _proxy_rate_limited_at.items()},
+        }
+    try:
+        path = os.path.join(data_dir, PROXY_STATE_FILE)
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(state, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def load_proxy_state(data_dir: str):
+    """Load proxy tags and rate-limit timestamps from proxy_state.json."""
+    global _proxy_tags, _proxy_rate_limited_at
+    try:
+        path = os.path.join(data_dir, PROXY_STATE_FILE)
+        if not os.path.isfile(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            state = _json.load(f)
+        with _proxy_lock:
+            loaded_tags = state.get("tags", {})
+            for proxy, tag in loaded_tags.items():
+                if tag in (
+                    PROXY_TAG_UNTESTED,
+                    PROXY_TAG_WORKING,
+                    PROXY_TAG_DEAD,
+                    PROXY_TAG_RATE_LIMITED,
+                ):
+                    _proxy_tags[proxy] = tag
+            loaded_rl = state.get("rate_limited_at", {})
+            for proxy, ts in loaded_rl.items():
+                _proxy_rate_limited_at[proxy] = float(ts)
+    except Exception:
+        pass
 
 
 def _make_proxies_dict(proxy: Optional[str] = None) -> Optional[dict]:
@@ -186,16 +416,17 @@ def test_proxy_latency(proxy: str, timeout: float = 5.0) -> float:
             return round(elapsed, 3)
     except Exception:
         pass
-    return float('inf')
+    return float("inf")
 
 
-def test_and_filter_proxies(proxies: List[str], max_latency: float = 4.0,
-                            max_workers: int = 30,
-                            callback=None) -> List[Tuple[str, float]]:
+def test_and_filter_proxies(
+    proxies: List[str], max_latency: float = 4.0, max_workers: int = 30, callback=None
+) -> List[Tuple[str, float]]:
     """Test all proxies in parallel and return sorted list of (proxy, latency)
     where latency <= max_latency. Calls callback(tested, total, proxy, latency)
     for progress updates."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     results = []
     total = len(proxies)
     tested = [0]  # mutable counter for thread safety
@@ -225,6 +456,7 @@ def test_and_filter_proxies(proxies: List[str], max_latency: float = 4.0,
 
 # ── Core helpers ──────────────────────────────────────────
 
+
 def random_user_agent() -> str:
     return USER_AGENTS[randint(0, len(USER_AGENTS) - 1)]
 
@@ -246,32 +478,47 @@ def make_cookies(mac: str) -> dict:
 
 def make_params(mac: str, action: str, _type: str) -> dict:
     return {
-        "mac": mac, "user": mac, "password": mac,
-        "action": action, "type": _type, "token": "",
+        "mac": mac,
+        "user": mac,
+        "password": mac,
+        "action": action,
+        "type": _type,
+        "token": "",
     }
 
 
-def _request_get(url, params=None, headers=None, cookies=None,
-                 timeout=5, proxy=None):
+def _request_get(url, params=None, headers=None, cookies=None, timeout=5, proxy=None):
     proxies = _make_proxies_dict(proxy)
     if headers and "X-User-Agent" not in headers:
         headers["X-User-Agent"] = "Model: MAG250; Link: Ethernet"
-    return requests.get(url, params=params, headers=headers,
-                        cookies=cookies, timeout=timeout, proxies=proxies)
+    return requests.get(
+        url,
+        params=params,
+        headers=headers,
+        cookies=cookies,
+        timeout=timeout,
+        proxies=proxies,
+    )
 
 
 # ── Portal functions (return status codes) ────────────────
 
-def check_portal(url: str, timeout: int = 5,
-                 proxy: str = None) -> Tuple[bool, int]:
+
+def check_portal(url: str, timeout: int = 5, proxy: str = None) -> Tuple[bool, int]:
     """Returns (responding, status_code)."""
     try:
         mac = generate_random_mac()
         params = make_params(mac, "handshake", "stb")
         cookies = make_cookies(mac)
         headers = {"User-Agent": random_user_agent(), "Accept": "*/*"}
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200 and res.json() is not None:
             return (True, res.status_code)
         return (False, res.status_code)
@@ -279,15 +526,22 @@ def check_portal(url: str, timeout: int = 5,
         return (False, 0)
 
 
-def get_handshake(url: str, mac: str, timeout: int = 5,
-                  proxy: str = None) -> Tuple[Optional[str], int]:
+def get_handshake(
+    url: str, mac: str, timeout: int = 5, proxy: str = None
+) -> Tuple[Optional[str], int]:
     """Returns (token_or_none, status_code)."""
     try:
         cookies = make_cookies(mac)
         params = make_params(mac, "handshake", "stb")
         headers = {"User-Agent": random_user_agent(), "Accept": "*/*"}
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200 and res.json():
             token = res.json().get("js", {}).get("token", None)
             return (token, res.status_code)
@@ -296,8 +550,9 @@ def get_handshake(url: str, mac: str, timeout: int = 5,
         return (None, 0)
 
 
-def get_responding_endpoint(server_address: str, timeout: int = 5,
-                            proxy: str = None) -> Tuple[Optional[str], int]:
+def get_responding_endpoint(
+    server_address: str, timeout: int = 5, proxy: str = None
+) -> Tuple[Optional[str], int]:
     """Returns (endpoint_or_none, last_status_code)."""
     last_code = 0
     for endpoint in ENDPOINTS:
@@ -317,8 +572,7 @@ def parse_url(url: str) -> str:
     return url
 
 
-def check_mac(url: str, mac: str, timeout: int = 5,
-              proxy: str = None) -> dict:
+def check_mac(url: str, mac: str, timeout: int = 5, proxy: str = None) -> dict:
     """
     Check if a MAC address is valid on the portal.
     Returns dict: {found, mac, codes, expiry, timestamp, error,
@@ -326,15 +580,20 @@ def check_mac(url: str, mac: str, timeout: int = 5,
     codes is list of HTTP status codes encountered.
     """
     result = {
-        "found": False, "mac": mac, "codes": [],
-        "expiry": None, "timestamp": None, "error": None,
-        "elapsed_ms": 0.0, "request_info": "", "response_info": "",
+        "found": False,
+        "mac": mac,
+        "codes": [],
+        "expiry": None,
+        "timestamp": None,
+        "error": None,
+        "elapsed_ms": 0.0,
+        "request_info": "",
+        "response_info": "",
     }
     t_start = time.time()
     try:
         cookies = make_cookies(mac)
-        token, hs_code = get_handshake(url, mac=mac, timeout=timeout,
-                                       proxy=proxy)
+        token, hs_code = get_handshake(url, mac=mac, timeout=timeout, proxy=proxy)
         result["codes"].append(hs_code)
 
         if not token:
@@ -350,9 +609,16 @@ def check_mac(url: str, mac: str, timeout: int = 5,
         }
         result["request_info"] = (
             f"GET {url}?action=get_main_info&type=account_info"
-            f"&mac={mac}  proxy={proxy or 'none'}")
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+            f"&mac={mac}  proxy={proxy or 'none'}"
+        )
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         result["codes"].append(res.status_code)
         try:
             result["response_info"] = res.text[:500]
@@ -375,9 +641,9 @@ def check_mac(url: str, mac: str, timeout: int = 5,
                 if len(parts) >= 5:
                     month_str, day, year, hh, tf = parts[:5]
                     hour, minute = hh.split(":")
-                    month_num = str(
-                        list(MONTHS_PL.keys()).index(month_str) + 1
-                    ).zfill(2)
+                    month_num = str(list(MONTHS_PL.keys()).index(month_str) + 1).zfill(
+                        2
+                    )
                     day = day.zfill(2)
                     h = int(hour)
                     if tf.lower() == "pm" and h != 12:
@@ -390,11 +656,9 @@ def check_mac(url: str, mac: str, timeout: int = 5,
                         f"{day}/{month_num}/{year}/{hour_str}/{minute}",
                         "%d/%m/%Y/%H/%M",
                     ).timestamp()
-                    result.update(found=True, expiry=str_datetime,
-                                  timestamp=timestamp)
+                    result.update(found=True, expiry=str_datetime, timestamp=timestamp)
                 else:
-                    result.update(found=True, expiry=str_datetime,
-                                  timestamp=0)
+                    result.update(found=True, expiry=str_datetime, timestamp=0)
             except Exception:
                 result.update(found=True, expiry=str_datetime, timestamp=0)
         else:
@@ -424,8 +688,9 @@ def check_mac(url: str, mac: str, timeout: int = 5,
         return result
 
 
-def count_channels_quick(url: str, mac: str, timeout: int = 5,
-                         proxy: str = None) -> int:
+def count_channels_quick(
+    url: str, mac: str, timeout: int = 5, proxy: str = None
+) -> int:
     """Quick channel count — handshake + single page fetch.
     Returns total_items count or 0 on failure."""
     try:
@@ -434,19 +699,31 @@ def count_channels_quick(url: str, mac: str, timeout: int = 5,
             return 0
         cookies = make_cookies(mac)
         params = {
-            "mac": mac, "user": mac, "password": mac,
-            "action": "get_ordered_list", "type": "itv",
-            "p": "1", "JsHttpRequest": "1-xml",
-            "force_ch_link_check": "", "fav": "0",
-            "genre": "*", "sortby": "number",
+            "mac": mac,
+            "user": mac,
+            "password": mac,
+            "action": "get_ordered_list",
+            "type": "itv",
+            "p": "1",
+            "JsHttpRequest": "1-xml",
+            "force_ch_link_check": "",
+            "fav": "0",
+            "genre": "*",
+            "sortby": "number",
         }
         headers = {
             "User-Agent": random_user_agent(),
             "Accept": "*/*",
             "Authorization": f"Bearer {token}",
         }
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200:
             js = res.json().get("js", {})
             data = js.get("data", []) if isinstance(js, dict) else []
@@ -487,9 +764,14 @@ def count_channels_quick(url: str, mac: str, timeout: int = 5,
             consecutive_no_growth = 0
             for page in range(2, max_pages + 1):
                 params["p"] = str(page)
-                page_res = _request_get(url, params=params, headers=headers,
-                                        cookies=cookies, timeout=timeout,
-                                        proxy=proxy)
+                page_res = _request_get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout,
+                    proxy=proxy,
+                )
                 if page_res.status_code != 200:
                     break
 
@@ -521,9 +803,15 @@ def count_channels_quick(url: str, mac: str, timeout: int = 5,
 
 # ── Channel / IPTV / VOD functions ───────────────────────
 
-def get_genres(url: str, mac: str, token: str,
-               content_type: str = "itv", timeout: int = 5,
-               proxy: str = None) -> List[Dict]:
+
+def get_genres(
+    url: str,
+    mac: str,
+    token: str,
+    content_type: str = "itv",
+    timeout: int = 5,
+    proxy: str = None,
+) -> List[Dict]:
     """Get genres/categories. content_type: 'itv', 'vod', 'series'."""
     try:
         cookies = make_cookies(mac)
@@ -534,8 +822,14 @@ def get_genres(url: str, mac: str, token: str,
             "Accept": "*/*",
             "Authorization": f"Bearer {token}",
         }
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200:
             data = res.json().get("js", [])
             if isinstance(data, list):
@@ -551,15 +845,23 @@ def get_genres(url: str, mac: str, token: str,
         return []
 
 
-def get_channels(url: str, mac: str, token: str,
-                 genre_id: str = "*", content_type: str = "itv",
-                 page: int = 1, timeout: int = 5,
-                 proxy: str = None) -> List[Dict]:
+def get_channels(
+    url: str,
+    mac: str,
+    token: str,
+    genre_id: str = "*",
+    content_type: str = "itv",
+    page: int = 1,
+    timeout: int = 5,
+    proxy: str = None,
+) -> List[Dict]:
     """Get items list. Works for itv, vod, series."""
     try:
         cookies = make_cookies(mac)
         params = {
-            "mac": mac, "user": mac, "password": mac,
+            "mac": mac,
+            "user": mac,
+            "password": mac,
             "action": "get_ordered_list",
             "type": content_type,
             "p": str(page),
@@ -579,8 +881,14 @@ def get_channels(url: str, mac: str, token: str,
             "Accept": "*/*",
             "Authorization": f"Bearer {token}",
         }
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200:
             js = res.json().get("js", {})
             data = js.get("data", [])
@@ -591,14 +899,22 @@ def get_channels(url: str, mac: str, token: str,
         return []
 
 
-def get_stream_url(url: str, mac: str, token: str, cmd: str,
-                   content_type: str = "itv", timeout: int = 5,
-                   proxy: str = None) -> Optional[str]:
+def get_stream_url(
+    url: str,
+    mac: str,
+    token: str,
+    cmd: str,
+    content_type: str = "itv",
+    timeout: int = 5,
+    proxy: str = None,
+) -> Optional[str]:
     """Get actual stream URL for a channel/vod item."""
     try:
         cookies = make_cookies(mac)
         params = {
-            "mac": mac, "user": mac, "password": mac,
+            "mac": mac,
+            "user": mac,
+            "password": mac,
             "action": "create_link",
             "type": content_type,
             "cmd": cmd,
@@ -609,8 +925,14 @@ def get_stream_url(url: str, mac: str, token: str, cmd: str,
             "Accept": "*/*",
             "Authorization": f"Bearer {token}",
         }
-        res = _request_get(url, params=params, headers=headers,
-                           cookies=cookies, timeout=timeout, proxy=proxy)
+        res = _request_get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            proxy=proxy,
+        )
         if res.status_code == 200:
             js = res.json().get("js", {})
             cmd_out = js.get("cmd", "")
