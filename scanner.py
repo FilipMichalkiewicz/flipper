@@ -329,10 +329,11 @@ def _make_proxies_dict(proxy: Optional[str] = None) -> Optional[dict]:
     return None
 
 
-def fetch_free_proxies(callback=None) -> List[str]:
+def fetch_free_proxies(callback=None, stop_event=None) -> List[str]:
     """Fetch free HTTP proxies from public APIs.
     If callback is provided, calls callback(source_name, new_count, total)
-    after each source is fetched."""
+    after each source is fetched.
+    If stop_event is provided, checks it before each source and stops early."""
     proxies = []
     seen = set()
     urls = [
@@ -375,6 +376,8 @@ def fetch_free_proxies(callback=None) -> List[str]:
         "https://raw.githubusercontent.com/UptimerBot/proxy-list/main/proxies/socks4.txt",
     ]
     for api_url in urls:
+        if stop_event and stop_event.is_set():
+            break
         try:
             r = requests.get(api_url, timeout=8)
             if r.status_code == 200:

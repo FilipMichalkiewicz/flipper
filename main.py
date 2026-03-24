@@ -1086,6 +1086,10 @@ class App:
         # Multi-proxy mode: each worker gets its own proxy
         self.multi_proxy_var = tk.BooleanVar(value=False)
 
+        # Proxy fetching control
+        self._proxy_fetching = False
+        self._proxy_fetch_stop = threading.Event()
+
         # Deep proxy testing (MAC-check based, 500 attempts)
         self._deep_proxy_testing = False
         self._deep_proxy_stop = threading.Event()
@@ -1762,9 +1766,10 @@ class App:
         top = tk.Frame(page, bg=BG_DARK)
         top.pack(fill=tk.X, pady=(4, 2))
 
-        self._make_btn(
-            top, "🔄 Pobierz proxy", ACCENT, "#1d4ed8", self._fetch_proxies
-        ).pack(side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
+        self.fetch_proxy_btn = self._make_btn(
+            top, "🔄 Pobierz proxy", ACCENT, "#1d4ed8", self._toggle_fetch_proxies
+        )
+        self.fetch_proxy_btn.pack(side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
 
         # Deep test button — toggles to Pause when testing
         self.deep_test_btn = self._make_btn(
@@ -3493,10 +3498,17 @@ class App:
         else:
             self._log(f"Załadowano {len(get_proxy_list())} proxy z sesji.", "info")
 
-    def _fetch_proxies(self):
+    def _toggle_fetch_proxies(self):
+        """Toggle between fetching and stopping proxy download."""
+        if self._proxy_fetching:
+            # Currently fetching — stop it
+            self._proxy_fetch_stop.set()
+            self._log("Zatrzymywanie pobierania proxy...", "warning")
+            return
         if self._proxy_testing:
             self._log("Test proxy już trwa.", "warning")
             return
+        self._proxy_fetch_stop.clear()
         self._log("Pobieranie listy proxy z API...", "info")
         self._set_progress(10, "Pobieranie proxy...")
         threading.Thread(target=self._fetch_only_worker, daemon=True).start()
@@ -3734,10 +3746,18 @@ class App:
     def _fetch_only_worker(self):
         """Fetch proxies from APIs and add them all with 'untested' tag.
         No latency testing — that's done via the 'Test' button."""
+        self._proxy_fetching = True
         self._proxy_testing = True
+        # Swap button to Stop
+        self.root.after(
+            0, lambda: self.fetch_proxy_btn.configure(text="⏹ Stop pobierania")
+        )
+
         self._log_safe("Pobieranie proxy z API...", "info")
 
         def _fetch_cb(source, new, total):
+            if self._proxy_fetch_stop.is_set():
+                return
             self.root.after(
                 0,
                 lambda: self.proxy_test_progress_label.configure(
@@ -3745,33 +3765,57 @@ class App:
                 ),
             )
 
-        proxies = fetch_free_proxies(callback=_fetch_cb)
-        if not proxies:
+        proxies = fetch_free_proxies(
+            callback=_fetch_cb, stop_event=self._proxy_fetch_stop
+        )
+
+        stopped = self._proxy_fetch_stop.is_set()
+
+        if not proxies and not stopped:
             self._log_safe("Nie udało się pobrać proxy.", "error")
             self._set_progress(100, "Błąd pobierania proxy")
             self._proxy_testing = False
+            self._proxy_fetching = False
+            self.root.after(
+                0, lambda: self.fetch_proxy_btn.configure(text="🔄 Pobierz proxy")
+            )
             return
 
         # Add all fetched proxies to the list with "untested" tag
         added = 0
+        existing = set(get_proxy_list())
         for p in proxies:
-            existing = get_proxy_list()
+            if self._proxy_fetch_stop.is_set():
+                break
             if p not in existing:
                 add_proxy(p)
+                existing.add(p)
                 added += 1
 
         self.root.after(0, self._refresh_proxy_tree)
         self._save_proxies_to_file()
         self._save_proxy_state()
         total_now = len(get_proxy_list())
-        self._log_safe(
-            f"Pobrano {len(proxies)} proxy, dodano {added} nowych. "
-            f"Łącznie: {total_now}. Użyj 'Testuj proxy' aby zweryfikować.",
-            "success",
-        )
+
+        if stopped:
+            self._log_safe(
+                f"Pobieranie przerwane. Dodano {added} proxy. Łącznie: {total_now}.",
+                "warning",
+            )
+        else:
+            self._log_safe(
+                f"Pobrano {len(proxies)} proxy, dodano {added} nowych. "
+                f"Łącznie: {total_now}. Użyj 'Testuj proxy' aby zweryfikować.",
+                "success",
+            )
         self._set_progress(100, f"{total_now} proxy pobrano")
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
         self._proxy_testing = False
+        self._proxy_fetching = False
+        # Restore button
+        self.root.after(
+            0, lambda: self.fetch_proxy_btn.configure(text="🔄 Pobierz proxy")
+        )
 
     def _fetch_proxies_worker(self):
         max_lat = self._get_max_latency()
@@ -5878,6 +5922,8 @@ class App:
         # Stop proxy testing if running
         self._proxy_stop.set()
         self._proxy_paused.set()
+        # Stop proxy fetching if running
+        self._proxy_fetch_stop.set()
         # Stop deep proxy testing if running
         self._deep_proxy_stop.set()
         self._deep_proxy_paused.set()
