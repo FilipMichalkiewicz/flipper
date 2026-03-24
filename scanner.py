@@ -90,6 +90,7 @@ def remove_proxy(proxy: str):
 
 def get_current_proxy() -> Optional[str]:
     """Return current proxy, skipping rate-limited ones still in cooldown."""
+    global _proxy_index
     with _proxy_lock:
         if not _proxy_list:
             return None

@@ -1861,14 +1861,6 @@ class App:
         self.max_latency_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=2)
         self.max_latency_entry.insert(0, str(self.max_proxy_latency))
 
-        self._make_btn(
-            row2,
-            "🔍 Retest obecnych",
-            "#c78d00",
-            "#a87600",
-            self._retest_current_proxies,
-        ).pack(side=tk.RIGHT, padx=(4, 4), ipady=2, ipadx=6)
-
         # Proxy test progress label
         self.proxy_test_progress_label = tk.Label(
             page, text="", font=("Helvetica", 10), bg=BG_DARK, fg="#55aaff"
@@ -3922,86 +3914,6 @@ class App:
         self.proxy_tree.insert(
             "", tk.END, values=(proxy, lat_str, status_text), tags=(tag,)
         )
-
-    def _retest_current_proxies(self):
-        """Re-test currently loaded proxies and remove slow ones."""
-        proxies = get_proxy_list()
-        if not proxies:
-            self._log("Brak proxy do przetestowania.", "warning")
-            return
-        if self._proxy_testing:
-            self._log("Test proxy już trwa.", "warning")
-            return
-        self._log(f"Ponowne testowanie {len(proxies)} proxy...", "info")
-        threading.Thread(target=self._retest_proxies_worker, daemon=True).start()
-
-    def _retest_proxies_worker(self):
-        max_lat = self._get_max_latency()
-        self._proxy_testing = True
-        self._proxy_stop.clear()
-        self._proxy_paused.set()
-        self.root.after(0, lambda: self._btn_enable(self.proxy_pause_btn))
-
-        proxies = get_proxy_list()
-        total = len(proxies)
-        self.root.after(
-            0,
-            lambda: self.proxy_test_progress_label.configure(
-                text=f"Retestowanie 0/{total} proxy..."
-            ),
-        )
-        self._set_progress(10, f"Retestowanie {total} proxy...")
-
-        accepted = []
-        tested_total = 0
-
-        for i, proxy in enumerate(proxies):
-            if self._proxy_stop.is_set():
-                break
-            self._proxy_paused.wait()
-            if self._proxy_stop.is_set():
-                break
-
-            tested_total += 1
-            latency = test_proxy_latency(proxy, timeout=max_lat + 1)
-            lat_str = f"{latency:.2f}s" if latency != float("inf") else "timeout"
-            pct = int(10 + (tested_total / total) * 80)
-            self._set_progress(pct, f"Retest {tested_total}/{total}")
-            self.root.after(
-                0,
-                lambda p=proxy, ls=lat_str, t=tested_total: (
-                    self.proxy_test_progress_label.configure(
-                        text=f"Retest {t}/{total} — {p} → {ls}"
-                    )
-                ),
-            )
-
-            if latency <= max_lat:
-                accepted.append((proxy, latency))
-
-        removed = tested_total - len(accepted)
-        if accepted:
-            accepted.sort(key=lambda x: x[1])
-            proxy_list = [p for p, _ in accepted]
-            set_proxy_list(proxy_list)
-            self._proxy_latencies = {p: lat for p, lat in accepted}
-            self._log_safe(
-                f"Retest: {len(accepted)}/{tested_total} OK, "
-                f"usunięto {removed} wolnych proxy.",
-                "success",
-            )
-        else:
-            set_proxy_list([])
-            self._proxy_latencies = {}
-            self._log_safe(f"Retest: wszystkie {tested_total} proxy za wolne!", "error")
-
-        self.root.after(0, self._refresh_proxy_tree)
-        self._save_proxies_to_file()
-        self._set_progress(100, f"{len(accepted)} proxy po reteście")
-        self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
-        self._proxy_testing = False
-        self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
-        self.root.after(0, lambda: self.proxy_pause_btn.configure(text="⏸ Pauza"))
 
     def _refresh_proxy_tree(self):
         for item in self.proxy_tree.get_children():
