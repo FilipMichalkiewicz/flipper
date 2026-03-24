@@ -3489,7 +3489,7 @@ class App:
     def _auto_fetch_proxies_on_startup(self):
         if not get_proxy_list():
             self._log("Auto-pobieranie proxy przy starcie...", "info")
-            threading.Thread(target=self._fetch_proxies_worker, daemon=True).start()
+            threading.Thread(target=self._fetch_only_worker, daemon=True).start()
         else:
             self._log(f"Załadowano {len(get_proxy_list())} proxy z sesji.", "info")
 
@@ -3497,9 +3497,9 @@ class App:
         if self._proxy_testing:
             self._log("Test proxy już trwa.", "warning")
             return
-        self._log("Pobieranie listy proxy z API i testowanie...", "info")
+        self._log("Pobieranie listy proxy z API...", "info")
         self._set_progress(10, "Pobieranie proxy...")
-        threading.Thread(target=self._fetch_proxies_worker, daemon=True).start()
+        threading.Thread(target=self._fetch_only_worker, daemon=True).start()
 
     def _toggle_proxy_pause(self):
         """Toggle pause/resume for proxy testing."""
@@ -3730,6 +3730,48 @@ class App:
                 self._log("Nie znaleziono MAC adresów w pliku.", "warning")
         except Exception as e:
             self._log(f"Błąd importu MAC: {e}", "error")
+
+    def _fetch_only_worker(self):
+        """Fetch proxies from APIs and add them all with 'untested' tag.
+        No latency testing — that's done via the 'Test' button."""
+        self._proxy_testing = True
+        self._log_safe("Pobieranie proxy z API...", "info")
+
+        def _fetch_cb(source, new, total):
+            self.root.after(
+                0,
+                lambda: self.proxy_test_progress_label.configure(
+                    text=f"Pobieranie: +{new} z {source} (łącznie: {total})"
+                ),
+            )
+
+        proxies = fetch_free_proxies(callback=_fetch_cb)
+        if not proxies:
+            self._log_safe("Nie udało się pobrać proxy.", "error")
+            self._set_progress(100, "Błąd pobierania proxy")
+            self._proxy_testing = False
+            return
+
+        # Add all fetched proxies to the list with "untested" tag
+        added = 0
+        for p in proxies:
+            existing = get_proxy_list()
+            if p not in existing:
+                add_proxy(p)
+                added += 1
+
+        self.root.after(0, self._refresh_proxy_tree)
+        self._save_proxies_to_file()
+        self._save_proxy_state()
+        total_now = len(get_proxy_list())
+        self._log_safe(
+            f"Pobrano {len(proxies)} proxy, dodano {added} nowych. "
+            f"Łącznie: {total_now}. Użyj 'Testuj proxy' aby zweryfikować.",
+            "success",
+        )
+        self._set_progress(100, f"{total_now} proxy pobrano")
+        self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
+        self._proxy_testing = False
 
     def _fetch_proxies_worker(self):
         max_lat = self._get_max_latency()
@@ -5565,12 +5607,10 @@ class App:
     def _scan_worker(self, server_address, mac_prefix, workers, timeout):
         # Pre-scan: ensure proxies are available
         if not get_proxy_list():
-            self._log_safe(
-                "Brak proxy — automatyczne pobieranie i testowanie...", "info"
-            )
+            self._log_safe("Brak proxy — automatyczne pobieranie...", "info")
             self._set_status("Pobieranie proxy...", "#55aaff")
             self._set_progress(5, "Pobieranie proxy...")
-            self._fetch_proxies_worker()
+            self._fetch_only_worker()
 
             if self.stop_event.is_set():
                 self._scan_finished()
