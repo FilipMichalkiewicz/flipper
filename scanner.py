@@ -338,43 +338,38 @@ def fetch_free_proxies(callback=None, max_count: int = 0) -> List[str]:
     proxies = []
     seen = set()
     urls = [
+        # ── APIs (reliable services) ──
         "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=&ssl=all&anonymity=all",
         "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=5000&country=&ssl=all&anonymity=all",
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://www.proxy-list.download/api/v1/get?type=https",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
-        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
-        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
-        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
-        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
-        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
-        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
-        "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
-        "https://raw.githubusercontent.com/ErcinDedeworken/proxy-list/main/proxy-list-raw.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/socks4/socks4.txt",
-        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt",
-        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
-        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt",
-        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXY_LIST/master/http.txt",
-        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXY_LIST/master/socks4.txt",
-        "https://raw.githubusercontent.com/FLAVOR17/proxy/main/HTTP.txt",
-        "https://raw.githubusercontent.com/FLAVOR17/proxy/main/SOCKS4.txt",
         "https://api.openproxylist.xyz/http.txt",
         "https://proxyspace.pro/http.txt",
         "https://proxyspace.pro/socks4.txt",
+        # ── GitHub (actively updated, sorted by stars) ──
+        # TheSpeedX — 5.4k stars, updated daily, largest list
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+        # proxifly — 4.3k stars, updated every 5 min
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
+        # clarketm — 2.4k stars, updated regularly
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        # monosans — 1.4k stars, updated daily
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
+        # hookzof — 941 stars, updated daily
         "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-        "https://raw.githubusercontent.com/UptimerBot/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/UptimerBot/proxy-list/main/proxies/socks4.txt",
+        # roosterkid — 792 stars, updated daily
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        # sunny9577 — 570 stars, updated daily
+        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
+        # zloi-user — 448 stars, updated daily
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+        # mmpx12 — 421 stars, updated daily
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+        # vakhov — 342 stars, updated daily
+        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt",
     ]
     for api_url in urls:
         if max_count > 0 and len(proxies) >= max_count:
@@ -408,13 +403,15 @@ def fetch_free_proxies(callback=None, max_count: int = 0) -> List[str]:
     return proxies
 
 
-def test_proxy_latency(proxy: str, timeout: float = 5.0) -> float:
-    """Test proxy latency in seconds. Returns latency or float('inf') on failure."""
-    test_url = "http://httpbin.org/ip"
+def test_proxy_latency(proxy: str, timeout: float = 5.0,
+                       test_url: str = None) -> float:
+    """Test proxy latency in seconds. Returns latency or float('inf') on failure.
+    If test_url is provided, tests against that URL instead of httpbin."""
+    url = test_url or "http://httpbin.org/ip"
     proxies_dict = {"http": proxy, "https": proxy}
     try:
         start = time.time()
-        r = requests.get(test_url, proxies=proxies_dict, timeout=timeout)
+        r = requests.get(url, proxies=proxies_dict, timeout=timeout)
         elapsed = time.time() - start
         if r.status_code == 200:
             return round(elapsed, 3)

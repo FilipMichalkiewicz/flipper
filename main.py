@@ -862,7 +862,17 @@ from scanner import (
     save_proxy_state,
     load_proxy_state,
 )
-from constants import RESULTS_FILE, SESSION_FILE
+from constants import (
+    RESULTS_FILE, SESSION_FILE,
+    BG_DARK, BG_SIDEBAR, BG_INPUT, BG_BAR, BG_MAIN, BG_TREEVIEW, BG_HEADING, BG_BLACK,
+    BORDER,
+    FG_DIM, FG_TEXT, FG_LIGHT, FG_LABEL, FG_MUTED, FG_SUBTLE, FG_INACTIVE, FG_DIM_DARK, FG_WHITE,
+    FG_CYAN, FG_INFO, FG_SUCCESS, FG_SUCCESS_SOFT, FG_WARNING, FG_CAUTION, FG_ERROR,
+    ACCENT, ACCENT_HOVER,
+    BTN_DEFAULT, BTN_DEFAULT_HOVER, BTN_SUCCESS, BTN_SUCCESS_HOVER,
+    BTN_DANGER, BTN_DANGER_HOVER, BTN_WARNING, BTN_WARNING_HOVER,
+    BTN_PURPLE, BTN_PURPLE_HOVER, BTN_NAV, BTN_NAV_HOVER, BTN_DISABLED,
+)
 
 
 def _diagnose_mpv_availability():
@@ -1012,16 +1022,64 @@ MAX_LOG_SAVE = 500
 CONFIG_FILE = "config.ini"
 CHANNELS_CACHE_FILE = "channels_cache.json"
 APP_VERSION = "1.2.0"
-BG_DARK = "#0a0a1e"
-BG_SIDEBAR = "#1a1a2e"
-BG_INPUT = "#12122a"
-BG_BAR = "#16162a"
-FG_DIM = "#888888"
-ACCENT = "#2563eb"
 MAX_PROXY_RETRIES = 15
 PROXY_TEST_BATCH_SIZE = 5
 DEFAULT_UPDATE_REPO = "FilipMichalkiewicz/flipper"
 DEFAULT_UPDATE_BRANCH = "main"
+
+# ── Font constants ────────────────────────────────────
+FONT_MAIN = ("Segoe UI", 11)
+FONT_MAIN_BOLD = ("Segoe UI", 11, "bold")
+FONT_SMALL = ("Segoe UI", 10)
+FONT_SMALL_BOLD = ("Segoe UI", 10, "bold")
+FONT_MONO = ("Consolas", 11)
+FONT_MONO_SMALL = ("Consolas", 10)
+FONT_TITLE = ("Segoe UI", 20, "bold")
+FONT_SECTION = ("Segoe UI", 14, "bold")
+FONT_TAB = ("Segoe UI", 10, "bold")
+
+
+class Tooltip:
+    """Lightweight hover tooltip for any Tkinter widget."""
+
+    def __init__(self, widget, text, delay=400):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._tw = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._hide()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._tw = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tw.attributes("-topmost", True)
+        lbl = tk.Label(
+            tw, text=self.text, bg="#1e1e3a", fg=FG_TEXT,
+            font=FONT_SMALL, relief="solid", bd=1, padx=8, pady=4,
+            wraplength=320, justify=tk.LEFT,
+        )
+        lbl.pack()
+
+    def _hide(self, event=None):
+        if self._after_id:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+        if self._tw:
+            self._tw.destroy()
+            self._tw = None
+
+    def update_text(self, new_text):
+        self.text = new_text
 
 
 class App:
@@ -1105,6 +1163,13 @@ class App:
         self.account_info_text = ""
         self._is_closing = False
 
+        # Scan timing (for MACs/sec in status bar)
+        self._scan_start_time = None
+        self._status_update_timer = None
+
+        # Tab notification badges: {tab_index: pending_count}
+        self._tab_badges = {}
+
         self._setup_styles()
         self._build_gui()
 
@@ -1178,28 +1243,54 @@ class App:
             style.theme_use("clam")
         except Exception:
             pass
+
+        # Dark theme for root
+        self.root.configure(bg=BG_DARK)
+
         style.configure(
             "Treeview",
-            background="#1e1e3a",
-            foreground="#d0d0e8",
-            fieldbackground="#1e1e3a",
-            rowheight=26,
-            font=("Menlo", 11),
+            background=BG_TREEVIEW,
+            foreground=FG_LIGHT,
+            fieldbackground=BG_TREEVIEW,
+            rowheight=28,
+            font=FONT_MONO,
         )
         style.configure(
             "Treeview.Heading",
-            background="#2a2a4a",
-            foreground="#ffffff",
-            font=("Menlo", 11, "bold"),
+            background=BG_HEADING,
+            foreground=FG_WHITE,
+            font=FONT_MAIN_BOLD,
+            padding=(8, 4),
         )
-        style.map("Treeview", background=[("selected", ACCENT)])
+        style.map(
+            "Treeview",
+            background=[("selected", ACCENT)],
+            foreground=[("selected", FG_WHITE)],
+        )
+        # Alternating row tag colors
+        style.configure("odd.Treeview", background=BG_TREEVIEW)
+        style.configure("even.Treeview", background="#222244")
+
         style.configure(
             "green.Horizontal.TProgressbar",
-            troughcolor="#1e1e3a",
-            background="#00b359",
-            darkcolor="#009945",
-            lightcolor="#00ff88",
-            bordercolor="#333355",
+            troughcolor=BG_TREEVIEW,
+            background=BTN_SUCCESS,
+            darkcolor=BTN_SUCCESS_HOVER,
+            lightcolor=FG_SUCCESS,
+            bordercolor=BORDER,
+        )
+
+        # Scrollbar dark style
+        style.configure(
+            "Vertical.TScrollbar",
+            background=BORDER,
+            troughcolor=BG_DARK,
+            arrowcolor=FG_MUTED,
+            bordercolor=BG_DARK,
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", BTN_DEFAULT_HOVER)],
         )
 
     # ══════════════════════════════════════════════════════
@@ -1224,18 +1315,22 @@ class App:
         self._build_sidebar_player(self.sidebar_player)
 
         # RIGHT main area
-        right = tk.Frame(self.root, bg="#0f0f23")
+        right = tk.Frame(self.root, bg=BG_MAIN)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Tab bar
         tab_bar = tk.Frame(right, bg=BG_BAR)
         tab_bar.pack(fill=tk.X)
 
+        # Accent line under tab bar
+        tk.Frame(right, height=2, bg=ACCENT).pack(fill=tk.X)
+
         self.tab_btns = []
         self.tab_pages = []
+        self._tab_badge_labels = []
         tab_labels = [
             "📋 Logi",
-            "✅ Aktywne MAC",
+            "✅ MAC",
             "🌐 Proxy",
             "📺 Player",
             "👤 Profile",
@@ -1243,20 +1338,30 @@ class App:
             "⚙️ Ustawienia",
         ]
         for i, label in enumerate(tab_labels):
+            tab_frame = tk.Frame(tab_bar, bg=BORDER)
+            tab_frame.pack(
+                side=tk.LEFT, padx=(10 if i == 0 else 2, 2), pady=5
+            )
             b = self._make_btn(
-                tab_bar,
+                tab_frame,
                 label,
-                "#333355",
-                "#444466",
+                BORDER,
+                BTN_DEFAULT_HOVER,
                 lambda idx=i: self._switch_tab(idx),
             )
-            b.pack(
-                side=tk.LEFT, padx=(10 if i == 0 else 3, 3), pady=5, ipady=3, ipadx=8
-            )
+            b.configure(font=FONT_TAB)
+            b.pack(side=tk.LEFT, ipady=4, ipadx=10)
             self.tab_btns.append(b)
 
+            # Badge label (hidden by default)
+            badge = tk.Label(
+                tab_frame, text="", font=("Segoe UI", 8, "bold"),
+                bg=FG_ERROR, fg=FG_WHITE, padx=4, pady=0,
+            )
+            self._tab_badge_labels.append(badge)
+
         # Pages container
-        self.pages_frame = tk.Frame(right, bg="#0f0f23")
+        self.pages_frame = tk.Frame(right, bg=BG_MAIN)
         self.pages_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         self._build_page_logs(self.pages_frame)
@@ -1267,95 +1372,103 @@ class App:
         self._build_page_info(self.pages_frame)
         self._build_page_settings(self.pages_frame)
 
-        # Progress bar at bottom
-        progress_frame = tk.Frame(right, bg=BG_BAR, height=28)
-        progress_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        progress_frame.pack_propagate(False)
+        # ── Status bar at bottom ──
+        status_frame = tk.Frame(right, bg=BG_BAR, height=32)
+        status_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        status_frame.pack_propagate(False)
+
+        # Accent line above status bar
+        tk.Frame(right, height=1, bg=ACCENT).pack(fill=tk.X, side=tk.BOTTOM)
 
         self.progress_bar = ttk.Progressbar(
-            progress_frame,
+            status_frame,
             orient=tk.HORIZONTAL,
             mode="determinate",
             style="green.Horizontal.TProgressbar",
             maximum=100,
         )
         self.progress_bar.pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 4), pady=4
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 6), pady=6
         )
 
         self.progress_label = tk.Label(
-            progress_frame,
-            text="Gotowy",
-            font=("Helvetica", 10),
-            bg=BG_BAR,
-            fg=FG_DIM,
-            anchor=tk.W,
+            status_frame, text="Gotowy", font=FONT_SMALL,
+            bg=BG_BAR, fg=FG_DIM, anchor=tk.W,
         )
-        self.progress_label.pack(side=tk.LEFT, padx=(0, 10))
+        self.progress_label.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Separator
+        tk.Frame(status_frame, width=1, bg=BORDER).pack(
+            side=tk.LEFT, fill=tk.Y, padx=4, pady=4
+        )
+
+        # Scan speed label
+        self.status_speed_label = tk.Label(
+            status_frame, text="", font=FONT_SMALL,
+            bg=BG_BAR, fg=FG_MUTED, anchor=tk.W,
+        )
+        self.status_speed_label.pack(side=tk.LEFT, padx=(4, 8))
+
+        # Proxy count label
+        self.status_proxy_label = tk.Label(
+            status_frame, text="", font=FONT_SMALL,
+            bg=BG_BAR, fg=FG_MUTED, anchor=tk.W,
+        )
+        self.status_proxy_label.pack(side=tk.RIGHT, padx=(0, 10))
+
+        # Current proxy label
+        self.status_current_proxy = tk.Label(
+            status_frame, text="", font=FONT_SMALL,
+            bg=BG_BAR, fg=FG_DIM_DARK, anchor=tk.E,
+        )
+        self.status_current_proxy.pack(side=tk.RIGHT, padx=(0, 4))
 
         self._switch_tab(0)
 
     # ── Sidebar: Scanner ───────────────────────────────────
     def _build_sidebar_scanner(self, left):
+        # Accent stripe at top
+        tk.Frame(left, height=3, bg=ACCENT).pack(fill=tk.X)
+
         tk.Label(
-            left,
-            text="⚡ FLIPPER",
-            font=("Helvetica", 22, "bold"),
-            bg=BG_SIDEBAR,
-            fg="#00d4ff",
-        ).pack(pady=(14, 1))
+            left, text="⚡ FLIPPER", font=FONT_TITLE,
+            bg=BG_SIDEBAR, fg=FG_CYAN,
+        ).pack(pady=(12, 0))
         tk.Label(
-            left,
-            text="MAC Address Scanner",
-            font=("Helvetica", 10),
-            bg=BG_SIDEBAR,
-            fg=FG_DIM,
+            left, text=f"MAC Scanner  v{APP_VERSION}", font=FONT_SMALL,
+            bg=BG_SIDEBAR, fg=FG_DIM,
         ).pack(pady=(0, 8))
         self._sep(left)
 
         self._lbl(left, "URL serwera")
         self.url_entry = self._entry(left)
+        Tooltip(self.url_entry, "Adres serwera Stalker portal, np. http://example.com")
 
         self._lbl(left, "Pierwsze 3 bajty MAC")
         self.mac_entry = self._entry(left, "00:1B:79")
+        Tooltip(self.mac_entry, "Prefix MAC w formacie XX:XX:XX — reszta generowana losowo")
 
-        self._lbl(left, "Proxy (wpisz aby nadpisać auto-proxy)")
+        self._lbl(left, "Proxy (nadpisanie)")
         self.proxy_inline_entry = self._entry(left)
+        Tooltip(self.proxy_inline_entry, "Wpisz proxy aby nadpisać auto-rotację, np. http://1.2.3.4:8080")
 
-        self._lbl(left, "Ilość procesów")
+        self._lbl(left, "Wątki")
         self.workers_entry = self._entry(left, "10")
+        Tooltip(self.workers_entry, "Ilość równoległych wątków skanowania (1-50)")
 
         self._lbl(left, "Timeout (s)")
         self.timeout_entry = self._entry(left, "5")
+        Tooltip(self.timeout_entry, "Maksymalny czas oczekiwania na odpowiedź serwera")
 
         # Checkboxes row
         cb_frame = tk.Frame(left, bg=BG_SIDEBAR)
         cb_frame.pack(fill=tk.X, padx=16, pady=(2, 4))
 
         self.save_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            cb_frame,
-            text="Zapisuj",
-            variable=self.save_var,
-            bg=BG_SIDEBAR,
-            fg="#aaaaaa",
-            selectcolor=BG_INPUT,
-            activebackground=BG_SIDEBAR,
-            activeforeground="#cccccc",
-            font=("Helvetica", 10),
-        ).pack(side=tk.LEFT)
+        self._make_checkbox(cb_frame, "Zapisuj", self.save_var).pack(side=tk.LEFT)
 
-        tk.Checkbutton(
-            cb_frame,
-            text="Na wierzchu",
-            variable=self.keep_on_top_var,
-            bg=BG_SIDEBAR,
-            fg="#aaaaaa",
-            selectcolor=BG_INPUT,
-            activebackground=BG_SIDEBAR,
-            activeforeground="#cccccc",
-            font=("Helvetica", 10),
-            command=self._toggle_keep_on_top,
+        self._make_checkbox(
+            cb_frame, "Na wierzchu", self.keep_on_top_var, command=self._toggle_keep_on_top
         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # Proxy info label (scanning is always via proxy)
@@ -1364,118 +1477,90 @@ class App:
             text="🔒 Proxy",
             font=("Helvetica", 10, "bold"),
             bg=BG_SIDEBAR,
-            fg="#55aaff",
+            fg=FG_INFO,
         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # Min channels filter
         min_ch_frame = tk.Frame(left, bg=BG_SIDEBAR)
         min_ch_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
         tk.Label(
-            min_ch_frame,
-            text="Min. kanałów:",
-            font=("Helvetica", 10, "bold"),
-            bg=BG_SIDEBAR,
-            fg="#c8c8e0",
+            min_ch_frame, text="Min. kanałów:", font=FONT_SMALL_BOLD,
+            bg=BG_SIDEBAR, fg=FG_LABEL,
         ).pack(side=tk.LEFT)
-        self.min_channels_entry = tk.Entry(
-            min_ch_frame,
-            font=("Helvetica", 10),
-            width=6,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.min_channels_entry = self._make_entry(min_ch_frame, width=6)
         self.min_channels_entry.pack(side=tk.LEFT, padx=(4, 0), ipady=2)
         self.min_channels_entry.insert(0, "0")
+        Tooltip(self.min_channels_entry, "Odrzucaj MAC-i z mniejszą ilością kanałów (0 = brak filtra)")
 
         # Export button
         self._make_btn(
-            left, "📁 Eksportuj wyniki", "#333355", "#444466", self._export_results
+            left, "📁 Eksportuj wyniki", BORDER, BTN_DEFAULT_HOVER, self._export_results
         ).pack(fill=tk.X, padx=16, pady=(2, 6), ipady=2)
 
         self._sep(left)
 
         self.start_btn = self._make_btn(
-            left, "▶  START", "#00b359", "#009945", self._toggle_start
+            left, "▶  START", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._toggle_start
         )
         self.start_btn.pack(fill=tk.X, padx=16, pady=(4, 4), ipady=6)
 
         ps = tk.Frame(left, bg=BG_SIDEBAR)
         ps.pack(fill=tk.X, padx=16, pady=(0, 6))
         self.pause_btn = self._make_btn(
-            ps, "⏸ PAUZA", "#c78d00", "#a87600", self._toggle_pause
+            ps, "⏸ PAUZA", BTN_WARNING, BTN_WARNING_HOVER, self._toggle_pause
         )
         self.pause_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 3), ipady=4)
         self._btn_disable(self.pause_btn)
 
         self.stop_btn = self._make_btn(
-            ps, "⏹ STOP", "#cc3333", "#aa2222", self._stop_scan
+            ps, "⏹ STOP", BTN_DANGER, BTN_DANGER_HOVER, self._stop_scan
         )
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(3, 0), ipady=4)
         self._btn_disable(self.stop_btn)
 
         # Rotate proxy button
         self.rotate_proxy_btn = self._make_btn(
-            left, "🔄 Zmień proxy", "#6d28d9", "#5b21b6", self._rotate_proxy_manual
+            left, "🔄 Zmień proxy", BTN_PURPLE, BTN_PURPLE_HOVER, self._rotate_proxy_manual
         )
         self.rotate_proxy_btn.pack(fill=tk.X, padx=16, pady=(2, 2), ipady=3)
 
         # Multi-proxy checkbox
-        tk.Checkbutton(
-            left,
-            text="Multi-proxy (wiele proxy naraz)",
-            variable=self.multi_proxy_var,
-            font=("Helvetica", 10),
-            anchor=tk.W,
-            bg=BG_SIDEBAR,
-            fg="#c8c8e0",
-            selectcolor=BG_INPUT,
-            activebackground=BG_SIDEBAR,
-            activeforeground="#c8c8e0",
-        ).pack(fill=tk.X, padx=18, pady=(0, 4))
+        mp_cb = self._make_checkbox(
+            left, "Multi-proxy (wiele proxy naraz)", self.multi_proxy_var, fg=FG_LABEL
+        )
+        mp_cb.pack(fill=tk.X, padx=18, pady=(0, 4))
+        Tooltip(mp_cb, "Każdy wątek skanera używa innego proxy — szybciej, ale zużywa więcej proxy")
 
         self._sep(left)
+
+        # Stats section
+        stats_frame = tk.Frame(left, bg=BG_INPUT, highlightthickness=1,
+                               highlightbackground=BORDER)
+        stats_frame.pack(fill=tk.X, padx=14, pady=(4, 4))
+
         self.stat_checked = tk.Label(
-            left,
-            text="Sprawdzono:  0",
-            font=("Helvetica", 12),
-            anchor=tk.W,
-            bg=BG_SIDEBAR,
-            fg="#aaaaaa",
+            stats_frame, text="Sprawdzono:  0", font=FONT_MAIN,
+            anchor=tk.W, bg=BG_INPUT, fg=FG_MUTED,
         )
-        self.stat_checked.pack(fill=tk.X, padx=18, pady=(4, 0))
+        self.stat_checked.pack(fill=tk.X, padx=10, pady=(6, 0))
         self.stat_found = tk.Label(
-            left,
-            text="Znaleziono:    0",
-            font=("Helvetica", 12),
-            anchor=tk.W,
-            bg=BG_SIDEBAR,
-            fg="#00ff88",
+            stats_frame, text="Znaleziono:    0", font=FONT_MAIN_BOLD,
+            anchor=tk.W, bg=BG_INPUT, fg=FG_SUCCESS,
         )
-        self.stat_found.pack(fill=tk.X, padx=18)
+        self.stat_found.pack(fill=tk.X, padx=10)
         self.stat_status = tk.Label(
-            left,
-            text="Status: Bezczynny",
-            font=("Helvetica", 11),
-            anchor=tk.W,
-            bg=BG_SIDEBAR,
-            fg="#666666",
+            stats_frame, text="Status: Bezczynny", font=FONT_SMALL,
+            anchor=tk.W, bg=BG_INPUT, fg=FG_INACTIVE,
         )
-        self.stat_status.pack(fill=tk.X, padx=18, pady=(4, 0))
+        self.stat_status.pack(fill=tk.X, padx=10, pady=(0, 6))
 
     # ── Sidebar: Player (only MACs + Profiles) ────────────
     def _build_sidebar_player(self, left):
+        tk.Frame(left, height=3, bg=ACCENT).pack(fill=tk.X)
         tk.Label(
-            left,
-            text="📺 PLAYER",
-            font=("Helvetica", 22, "bold"),
-            bg=BG_SIDEBAR,
-            fg="#00d4ff",
-        ).pack(pady=(14, 1))
+            left, text="📺 PLAYER", font=FONT_TITLE,
+            bg=BG_SIDEBAR, fg=FG_CYAN,
+        ).pack(pady=(12, 1))
         self._sep(left)
 
         self.active_profile_label = tk.Label(
@@ -1483,7 +1568,7 @@ class App:
             text="Aktywny: (brak)",
             font=("Helvetica", 11, "bold"),
             bg=BG_SIDEBAR,
-            fg="#ffaa00",
+            fg=FG_WARNING,
             anchor=tk.W,
             wraplength=240,
         )
@@ -1498,7 +1583,7 @@ class App:
         self.player_sub_pages = []
 
         b_macs = self._make_btn(
-            sub_frame, "MAC-i", ACCENT, "#1d4ed8", lambda: self._switch_player_sub(0)
+            sub_frame, "MAC-i", ACCENT, ACCENT_HOVER, lambda: self._switch_player_sub(0)
         )
         b_macs.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2), ipady=2)
         self.player_sub_btns.append(b_macs)
@@ -1506,8 +1591,8 @@ class App:
         b_prof = self._make_btn(
             sub_frame,
             "Profile",
-            "#333355",
-            "#444466",
+            BORDER,
+            BTN_DEFAULT_HOVER,
             lambda: self._switch_player_sub(1),
         )
         b_prof.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0), ipady=2)
@@ -1524,9 +1609,9 @@ class App:
 
         self.player_mac_listbox = tk.Listbox(
             sp0,
-            font=("Menlo", 10),
+            font=FONT_MONO_SMALL,
             bg=BG_INPUT,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
             selectbackground=ACCENT,
             selectforeground="white",
             relief="flat",
@@ -1546,9 +1631,9 @@ class App:
 
         self.player_profile_listbox = tk.Listbox(
             sp1,
-            font=("Menlo", 10),
+            font=FONT_MONO_SMALL,
             bg=BG_INPUT,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
             selectbackground=ACCENT,
             selectforeground="white",
             relief="flat",
@@ -1569,20 +1654,20 @@ class App:
         bot = tk.Frame(left, bg=BG_SIDEBAR)
         bot.pack(fill=tk.X, padx=10, pady=(0, 6))
         self._make_btn(
-            bot, "🗑 Usuń MAC", "#cc3333", "#aa2222", self._delete_selected_player_mac
+            bot, "🗑 Usuń MAC", BTN_DANGER, BTN_DANGER_HOVER, self._delete_selected_player_mac
         ).pack(fill=tk.X, ipady=3, pady=(2, 2))
         self._make_btn(
             bot,
             "✏️ Edytuj profil",
-            "#c78d00",
-            "#a87600",
+            BTN_WARNING,
+            BTN_WARNING_HOVER,
             self._edit_selected_player_profile,
         ).pack(fill=tk.X, ipady=3, pady=(0, 2))
         self._make_btn(
             bot,
             "🗑 Usuń profil",
-            "#cc3333",
-            "#aa2222",
+            BTN_DANGER,
+            BTN_DANGER_HOVER,
             self._delete_selected_player_profile,
         ).pack(fill=tk.X, ipady=3, pady=(0, 2))
 
@@ -1593,15 +1678,9 @@ class App:
         self.tab_pages.append(page)
 
         self.log_text = tk.Text(
-            page,
-            font=("Menlo", 11),
-            bg=BG_DARK,
-            fg="#c8c8e0",
-            wrap=tk.WORD,
-            state=tk.DISABLED,
-            relief="flat",
-            bd=4,
-            insertbackground="#ffffff",
+            page, font=FONT_MONO, bg=BG_DARK, fg=FG_LABEL,
+            wrap=tk.WORD, state=tk.DISABLED, relief="flat",
+            bd=6, padx=4, pady=4, insertbackground=FG_WHITE,
         )
         sb = tk.Scrollbar(page, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=sb.set)
@@ -1609,11 +1688,11 @@ class App:
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         for tag, color in [
-            ("success", "#00ff88"),
-            ("error", "#ff4444"),
-            ("info", "#55aaff"),
-            ("warning", "#ffaa00"),
-            ("dim", "#555577"),
+            ("success", FG_SUCCESS),
+            ("error", FG_ERROR),
+            ("info", FG_INFO),
+            ("warning", FG_WARNING),
+            ("dim", FG_DIM_DARK),
         ]:
             self.log_text.tag_config(tag, foreground=color)
 
@@ -1626,7 +1705,7 @@ class App:
         search_frame = tk.Frame(page, bg=BG_DARK)
         search_frame.pack(fill=tk.X, padx=4, pady=(4, 2))
         tk.Label(
-            search_frame, text="🔍", font=("Helvetica", 12), bg=BG_DARK, fg="#aaaaaa"
+            search_frame, text="🔍", font=("Helvetica", 12), bg=BG_DARK, fg=FG_MUTED
         ).pack(side=tk.LEFT, padx=(4, 2))
         self.mac_search_var = tk.StringVar()
         self.mac_search_entry = tk.Entry(
@@ -1634,12 +1713,12 @@ class App:
             textvariable=self.mac_search_var,
             font=("Helvetica", 11),
             bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
+            fg=FG_TEXT,
+            insertbackground=FG_WHITE,
             relief="flat",
             highlightthickness=1,
             highlightcolor=ACCENT,
-            highlightbackground="#333355",
+            highlightbackground=BORDER,
         )
         self.mac_search_entry.pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=3
@@ -1655,49 +1734,26 @@ class App:
             text="MAC:",
             font=("Helvetica", 10, "bold"),
             bg=BG_DARK,
-            fg="#c8c8e0",
+            fg=FG_LABEL,
         ).pack(side=tk.LEFT, padx=(4, 2))
-        self.add_mac_entry = tk.Entry(
-            add_mac_frame,
-            font=("Helvetica", 11),
-            width=20,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.add_mac_entry = self._make_entry(add_mac_frame, width=20, default="00:1A:79:")
         self.add_mac_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=3)
-        self.add_mac_entry.insert(0, "00:1A:79:")
 
         tk.Label(
             add_mac_frame,
             text="URL:",
             font=("Helvetica", 10, "bold"),
             bg=BG_DARK,
-            fg="#c8c8e0",
+            fg=FG_LABEL,
         ).pack(side=tk.LEFT, padx=(4, 2))
-        self.add_mac_url_entry = tk.Entry(
-            add_mac_frame,
-            font=("Helvetica", 11),
-            width=30,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.add_mac_url_entry = self._make_entry(add_mac_frame, width=30)
         self.add_mac_url_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=3)
 
         self._make_btn(
-            add_mac_frame, "➕ Dodaj", "#00b359", "#009945", self._add_mac_manually
+            add_mac_frame, "➕ Dodaj", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._add_mac_manually
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            add_mac_frame, "🎲 Losowy", "#6d28d9", "#5b21b6", self._add_random_mac
+            add_mac_frame, "🎲 Losowy", BTN_PURPLE, BTN_PURPLE_HOVER, self._add_random_mac
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
         tf = tk.Frame(page, bg=BG_DARK)
@@ -1722,32 +1778,42 @@ class App:
         tsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True)
 
+        # Right-click context menu for MAC list
+        self._mac_ctx_menu = self._make_context_menu([
+            ("📋 Kopiuj MAC", self._copy_selected_mac),
+            ("🧬 Klonuj MAC", self._clone_selected_mac),
+            ("💾 Zapisz jako profil", self._save_selected_as_profile),
+            "---",
+            ("🗑 Usuń", self._delete_selected_active_mac),
+        ])
+        self.tree.bind("<Button-3>", lambda e: self._treeview_context(e, self.tree, self._mac_ctx_menu))
+
         bot = tk.Frame(page, bg=BG_DARK)
         bot.pack(fill=tk.X, pady=(4, 0))
         self._make_btn(
-            bot, "📋 Kopiuj zaznaczony", ACCENT, "#1d4ed8", self._copy_selected_mac
+            bot, "📋 Kopiuj zaznaczony", ACCENT, ACCENT_HOVER, self._copy_selected_mac
         ).pack(side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "📋 Kopiuj wszystkie", "#333355", "#444466", self._copy_all_macs
+            bot, "📋 Kopiuj wszystkie", BORDER, BTN_DEFAULT_HOVER, self._copy_all_macs
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "🧬 Klonuj MAC", "#6d28d9", "#5b21b6", self._clone_selected_mac
+            bot, "🧬 Klonuj MAC", BTN_PURPLE, BTN_PURPLE_HOVER, self._clone_selected_mac
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "🗑 Usuń MAC", "#cc3333", "#aa2222", self._delete_selected_active_mac
+            bot, "🗑 Usuń MAC", BTN_DANGER, BTN_DANGER_HOVER, self._delete_selected_active_mac
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
             bot,
             "💾 Zapisz profil",
-            "#00b359",
-            "#009945",
+            BTN_SUCCESS,
+            BTN_SUCCESS_HOVER,
             self._save_selected_as_profile,
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
             bot,
             "📂 Import MAC z pliku",
-            "#6d28d9",
-            "#5b21b6",
+            BTN_PURPLE,
+            BTN_PURPLE_HOVER,
             self._import_macs_from_file,
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self.mac_count_label = tk.Label(
@@ -1766,35 +1832,23 @@ class App:
         top.pack(fill=tk.X, pady=(4, 2))
 
         self._make_btn(
-            top, "🔄 Pobierz proxy", ACCENT, "#1d4ed8", self._fetch_proxies
+            top, "🔄 Pobierz proxy", ACCENT, ACCENT_HOVER, self._fetch_proxies
         ).pack(side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
 
         tk.Label(
-            top, text="Maks:", font=("Helvetica", 10), bg=BG_DARK, fg="#aaaaaa"
+            top, text="Maks:", font=("Helvetica", 10), bg=BG_DARK, fg=FG_MUTED
         ).pack(side=tk.LEFT, padx=(2, 2))
-        self.max_proxy_count_entry = tk.Entry(
-            top,
-            font=("Helvetica", 11),
-            width=6,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.max_proxy_count_entry = self._make_entry(top, width=6, default="500")
         self.max_proxy_count_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=2)
-        self.max_proxy_count_entry.insert(0, "500")
 
         # Deep test button — toggles to Pause when testing
         self.deep_test_btn = self._make_btn(
-            top, "🧪 Testuj proxy", "#00b359", "#009945", self._toggle_deep_proxy_test
+            top, "🧪 Testuj proxy", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._toggle_deep_proxy_test
         )
         self.deep_test_btn.pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
         self.proxy_pause_btn = self._make_btn(
-            top, "⏸ Pauza", "#c78d00", "#a87600", self._toggle_proxy_pause
+            top, "⏸ Pauza", BTN_WARNING, BTN_WARNING_HOVER, self._toggle_proxy_pause
         )
         self.proxy_pause_btn.pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._btn_disable(self.proxy_pause_btn)
@@ -1802,12 +1856,12 @@ class App:
         self._make_btn(
             top,
             "📂 Import z pliku",
-            "#6d28d9",
-            "#5b21b6",
+            BTN_PURPLE,
+            BTN_PURPLE_HOVER,
             self._import_proxies_from_file,
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            top, "🗑 Wyczyść listę", "#cc3333", "#aa2222", self._clear_proxies
+            top, "🗑 Wyczyść listę", BTN_DANGER, BTN_DANGER_HOVER, self._clear_proxies
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
         self.proxy_count_label = tk.Label(
@@ -1820,50 +1874,26 @@ class App:
         row2.pack(fill=tk.X, pady=(2, 2))
 
         tk.Label(
-            row2, text="Dodaj:", font=("Helvetica", 11), bg=BG_DARK, fg="#aaaaaa"
+            row2, text="Dodaj:", font=("Helvetica", 11), bg=BG_DARK, fg=FG_MUTED
         ).pack(side=tk.LEFT, padx=(4, 4))
-        self.proxy_add_entry = tk.Entry(
-            row2,
-            font=("Helvetica", 11),
-            width=24,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.proxy_add_entry = self._make_entry(row2, width=24)
         self.proxy_add_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=3)
-        self._make_btn(row2, "➕", "#00b359", "#009945", self._add_custom_proxy).pack(
+        Tooltip(self.proxy_add_entry, "Format: http://ip:port")
+        self._make_btn(row2, "➕", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._add_custom_proxy).pack(
             side=tk.LEFT, padx=(0, 8), ipady=3, ipadx=4
         )
 
         tk.Label(
-            row2,
-            text="⏱ Maks. opóźnienie (s):",
-            font=("Helvetica", 10, "bold"),
-            bg=BG_DARK,
-            fg="#c8c8e0",
+            row2, text="⏱ Maks. opóźnienie (s):", font=FONT_SMALL_BOLD,
+            bg=BG_DARK, fg=FG_LABEL,
         ).pack(side=tk.LEFT, padx=(4, 4))
-        self.max_latency_entry = tk.Entry(
-            row2,
-            font=("Helvetica", 11),
-            width=5,
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.max_latency_entry = self._make_entry(row2, width=5, default=str(self.max_proxy_latency))
         self.max_latency_entry.pack(side=tk.LEFT, padx=(0, 4), ipady=2)
-        self.max_latency_entry.insert(0, str(self.max_proxy_latency))
+        Tooltip(self.max_latency_entry, "Proxy wolniejsze niż ten limit (sekundy) będą odrzucane podczas testu")
 
         # Proxy test progress label
         self.proxy_test_progress_label = tk.Label(
-            page, text="", font=("Helvetica", 10), bg=BG_DARK, fg="#55aaff"
+            page, text="", font=("Helvetica", 10), bg=BG_DARK, fg=FG_INFO
         )
         self.proxy_test_progress_label.pack(fill=tk.X, padx=4)
 
@@ -1899,10 +1929,18 @@ class App:
         psb.pack(side=tk.RIGHT, fill=tk.Y)
         self.proxy_tree.pack(fill=tk.BOTH, expand=True)
 
+        # Right-click context menu for proxy list
+        self._proxy_ctx_menu = self._make_context_menu([
+            ("📋 Kopiuj adres", self._copy_selected_proxy),
+            "---",
+            ("🗑 Usuń", self._remove_selected_proxy),
+        ])
+        self.proxy_tree.bind("<Button-3>", lambda e: self._treeview_context(e, self.proxy_tree, self._proxy_ctx_menu))
+
         bot = tk.Frame(page, bg=BG_DARK)
         bot.pack(fill=tk.X, pady=(4, 0))
         self._make_btn(
-            bot, "🗑 Usuń zaznaczony", "#cc3333", "#aa2222", self._remove_selected_proxy
+            bot, "🗑 Usuń zaznaczony", BTN_DANGER, BTN_DANGER_HOVER, self._remove_selected_proxy
         ).pack(side=tk.LEFT, padx=(4, 4), ipady=3, ipadx=6)
 
     # ── Page 3: Player (embedded mpv + channel panel) ─────
@@ -1929,8 +1967,8 @@ class App:
             btn = self._make_btn(
                 type_frame,
                 lbl,
-                ACCENT if ctype == "itv" else "#333355",
-                "#1d4ed8" if ctype == "itv" else "#444466",
+                ACCENT if ctype == "itv" else BORDER,
+                ACCENT_HOVER if ctype == "itv" else BTN_DEFAULT_HOVER,
                 lambda t=ctype: self._switch_content_type(t),
             )
             btn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X, ipady=2)
@@ -1939,16 +1977,9 @@ class App:
         # Player proxy checkbox
         proxy_player_frame = tk.Frame(right_panel, bg=BG_DARK)
         proxy_player_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
-        tk.Checkbutton(
-            proxy_player_frame,
-            text="Używaj proxy w Playerze",
-            variable=self.player_use_proxy_var,
-            bg=BG_DARK,
-            fg="#aaaaaa",
-            selectcolor=BG_INPUT,
-            activebackground=BG_DARK,
-            activeforeground="#cccccc",
-            font=("Helvetica", 10),
+        self._make_checkbox(
+            proxy_player_frame, "Używaj proxy w Playerze",
+            self.player_use_proxy_var, bg=BG_DARK
         ).pack(anchor=tk.W)
 
         # Genre dropdown
@@ -1959,13 +1990,13 @@ class App:
             text="Kategoria:",
             font=("Helvetica", 10),
             bg=BG_DARK,
-            fg="#aaaaaa",
+            fg=FG_MUTED,
         ).pack(side=tk.LEFT, padx=(0, 4))
         self.genre_var = tk.StringVar(value="Wszystkie")
         self.genre_menu = tk.OptionMenu(genre_frame, self.genre_var, "Wszystkie")
         self.genre_menu.configure(
             bg=BG_INPUT,
-            fg="#e0e0e0",
+            fg=FG_TEXT,
             font=("Helvetica", 10),
             activebackground=ACCENT,
             activeforeground="white",
@@ -1975,7 +2006,7 @@ class App:
         )
         self.genre_menu["menu"].configure(
             bg=BG_INPUT,
-            fg="#e0e0e0",
+            fg=FG_TEXT,
             font=("Helvetica", 10),
             activebackground=ACCENT,
             activeforeground="white",
@@ -1987,7 +2018,7 @@ class App:
         ch_search_frame = tk.Frame(right_panel, bg=BG_DARK)
         ch_search_frame.pack(fill=tk.X, padx=4, pady=(2, 2))
         tk.Label(
-            ch_search_frame, text="🔍", font=("Helvetica", 11), bg=BG_DARK, fg="#aaaaaa"
+            ch_search_frame, text="🔍", font=("Helvetica", 11), bg=BG_DARK, fg=FG_MUTED
         ).pack(side=tk.LEFT, padx=(0, 2))
         self.channel_search_var = tk.StringVar()
         ch_search_entry = tk.Entry(
@@ -1995,12 +2026,12 @@ class App:
             textvariable=self.channel_search_var,
             font=("Helvetica", 10),
             bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
+            fg=FG_TEXT,
+            insertbackground=FG_WHITE,
             relief="flat",
             highlightthickness=1,
             highlightcolor=ACCENT,
-            highlightbackground="#333355",
+            highlightbackground=BORDER,
         )
         ch_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=2)
         self.channel_search_var.trace_add("write", self._filter_channel_list)
@@ -2009,12 +2040,12 @@ class App:
         nav_frame = tk.Frame(right_panel, bg=BG_DARK)
         nav_frame.pack(fill=tk.X, padx=4, pady=(0, 2))
         self.go_back_btn = self._make_btn(
-            nav_frame, "← Wróć", "#555577", "#666688", self._nav_go_back
+            nav_frame, "← Wróć", FG_DIM_DARK, BTN_NAV_HOVER, self._nav_go_back
         )
         self.go_back_btn.pack(side=tk.LEFT, padx=(0, 2), ipady=1, ipadx=4)
         self._btn_disable(self.go_back_btn)
         self._make_btn(
-            nav_frame, "A→Z Sortuj", "#333355", "#444466", self._sort_channel_list
+            nav_frame, "A→Z Sortuj", BORDER, BTN_DEFAULT_HOVER, self._sort_channel_list
         ).pack(side=tk.LEFT, padx=2, ipady=1, ipadx=4)
         self.nav_label = tk.Label(
             nav_frame,
@@ -2045,17 +2076,24 @@ class App:
         self.channel_tree.pack(fill=tk.BOTH, expand=True)
         self.channel_tree.bind("<Double-1>", self._on_channel_double_click)
 
+        # Right-click context menu for channel list
+        self._channel_ctx_menu = self._make_context_menu([
+            ("▶ Odtwórz", self._play_selected_channel),
+            ("📋 Kopiuj URL streamu", self._copy_channel_url),
+        ])
+        self.channel_tree.bind("<Button-3>", lambda e: self._treeview_context(e, self.channel_tree, self._channel_ctx_menu))
+
         self.channel_count_label = tk.Label(
-            right_panel, text="Kanały: 0", font=("Helvetica", 10), bg=BG_DARK, fg=FG_DIM
+            right_panel, text="Kanały: 0", font=FONT_SMALL, bg=BG_DARK, fg=FG_DIM
         )
         self.channel_count_label.pack(pady=(2, 4))
 
         # CENTER: embedded player + controls
-        center = tk.Frame(page, bg="#000000")
+        center = tk.Frame(page, bg=BG_BLACK)
         center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Player area
-        self.player_frame = tk.Frame(center, bg="#000000")
+        self.player_frame = tk.Frame(center, bg=BG_BLACK)
         self.player_frame.pack(fill=tk.BOTH, expand=True)
 
         if not HAS_MPV:
@@ -2070,8 +2108,8 @@ class App:
                 self.player_frame,
                 text=error_text,
                 font=("Helvetica", 12),
-                bg="#000000",
-                fg="#555577",
+                bg=BG_BLACK,
+                fg=FG_DIM_DARK,
                 justify=tk.CENTER,
                 wraplength=600,
             ).place(relx=0.5, rely=0.5, anchor=tk.CENTER)
@@ -2081,22 +2119,22 @@ class App:
         controls.pack(fill=tk.X, side=tk.BOTTOM)
         controls.pack_propagate(False)
 
-        self._make_btn(controls, "⏮", "#333355", "#444466", self._player_prev).pack(
+        self._make_btn(controls, "⏮", BORDER, BTN_DEFAULT_HOVER, self._player_prev).pack(
             side=tk.LEFT, padx=(6, 2), ipady=2, ipadx=4
         )
         self.play_pause_btn = self._make_btn(
-            controls, "▶", "#00b359", "#009945", self._player_play_pause
+            controls, "▶", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._player_play_pause
         )
         self.play_pause_btn.pack(side=tk.LEFT, padx=2, ipady=2, ipadx=6)
-        self._make_btn(controls, "⏭", "#333355", "#444466", self._player_next).pack(
+        self._make_btn(controls, "⏭", BORDER, BTN_DEFAULT_HOVER, self._player_next).pack(
             side=tk.LEFT, padx=2, ipady=2, ipadx=4
         )
-        self._make_btn(controls, "⏹", "#cc3333", "#aa2222", self._player_stop).pack(
+        self._make_btn(controls, "⏹", BTN_DANGER, BTN_DANGER_HOVER, self._player_stop).pack(
             side=tk.LEFT, padx=2, ipady=2, ipadx=4
         )
 
         tk.Label(
-            controls, text="🔊", font=("Helvetica", 12), bg=BG_BAR, fg="#aaaaaa"
+            controls, text="🔊", font=("Helvetica", 12), bg=BG_BAR, fg=FG_MUTED
         ).pack(side=tk.LEFT, padx=(12, 2))
         self.volume_scale = tk.Scale(
             controls,
@@ -2104,8 +2142,8 @@ class App:
             to=100,
             orient=tk.HORIZONTAL,
             bg=BG_BAR,
-            fg="#ffffff",
-            troughcolor="#333355",
+            fg=FG_WHITE,
+            troughcolor=BORDER,
             highlightthickness=0,
             sliderrelief="flat",
             length=100,
@@ -2116,10 +2154,10 @@ class App:
         self.volume_scale.pack(side=tk.LEFT, padx=2)
 
         self._make_btn(
-            controls, "⛶ Fullscreen", "#333355", "#444466", self._player_fullscreen
+            controls, "⛶ Fullscreen", BORDER, BTN_DEFAULT_HOVER, self._player_fullscreen
         ).pack(side=tk.RIGHT, padx=(2, 6), ipady=2, ipadx=4)
         self._make_btn(
-            controls, "📋 Kopiuj URL", "#333355", "#444466", self._copy_channel_url
+            controls, "📋 Kopiuj URL", BORDER, BTN_DEFAULT_HOVER, self._copy_channel_url
         ).pack(side=tk.RIGHT, padx=2, ipady=2, ipadx=4)
 
         self.player_status_label = tk.Label(
@@ -2127,7 +2165,7 @@ class App:
             text="",
             font=("Helvetica", 10),
             bg=BG_BAR,
-            fg="#00ff88",
+            fg=FG_SUCCESS,
             anchor=tk.W,
         )
         self.player_status_label.pack(
@@ -2151,25 +2189,14 @@ class App:
             ("Proxy:", "profile_proxy_entry"),
         ]:
             tk.Label(
-                form, text=lbl_text, font=("Helvetica", 11), bg=BG_DARK, fg="#aaaaaa"
+                form, text=lbl_text, font=("Helvetica", 11), bg=BG_DARK, fg=FG_MUTED
             ).pack(side=tk.LEFT, padx=(0, 2))
-            e = tk.Entry(
-                form,
-                font=("Helvetica", 11),
-                width=16,
-                bg=BG_INPUT,
-                fg="#e0e0e0",
-                insertbackground="#ffffff",
-                relief="flat",
-                highlightthickness=1,
-                highlightcolor=ACCENT,
-                highlightbackground="#333355",
-            )
+            e = self._make_entry(form, width=16)
             e.pack(side=tk.LEFT, padx=(0, 8), ipady=3)
             setattr(self, attr, e)
 
         self._make_btn(
-            form, "💾 Zapisz profil", "#00b359", "#009945", self._save_profile_from_form
+            form, "💾 Zapisz profil", BTN_SUCCESS, BTN_SUCCESS_HOVER, self._save_profile_from_form
         ).pack(side=tk.LEFT, padx=4, ipady=3, ipadx=6)
 
         # Profile list
@@ -2193,19 +2220,29 @@ class App:
         prof_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.profile_tree.pack(fill=tk.BOTH, expand=True)
 
+        # Right-click context menu for profile list
+        self._profile_ctx_menu = self._make_context_menu([
+            ("✅ Ustaw aktywny", self._set_active_profile),
+            ("✏️ Zmień nazwę", self._rename_profile),
+            ("✏️ Edytuj", self._edit_profile),
+            "---",
+            ("🗑 Usuń", self._delete_profile),
+        ])
+        self.profile_tree.bind("<Button-3>", lambda e: self._treeview_context(e, self.profile_tree, self._profile_ctx_menu))
+
         bot = tk.Frame(page, bg=BG_DARK)
         bot.pack(fill=tk.X, padx=10, pady=(0, 10))
         self._make_btn(
-            bot, "✅ Ustaw aktywny", ACCENT, "#1d4ed8", self._set_active_profile
+            bot, "✅ Ustaw aktywny", ACCENT, ACCENT_HOVER, self._set_active_profile
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "✏️ Zmień nazwę", "#c78d00", "#a87600", self._rename_profile
+            bot, "✏️ Zmień nazwę", BTN_WARNING, BTN_WARNING_HOVER, self._rename_profile
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "✏️ Edytuj profil", "#c78d00", "#a87600", self._edit_profile
+            bot, "✏️ Edytuj profil", BTN_WARNING, BTN_WARNING_HOVER, self._edit_profile
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
         self._make_btn(
-            bot, "🗑 Usuń profil", "#cc3333", "#aa2222", self._delete_profile
+            bot, "🗑 Usuń profil", BTN_DANGER, BTN_DANGER_HOVER, self._delete_profile
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
     # ── Page 5: Info ──────────────────────────────────────
@@ -2215,23 +2252,20 @@ class App:
         self.tab_pages.append(page)
 
         tk.Label(
-            page,
-            text="ℹ️ Informacje o koncie",
-            font=("Helvetica", 16, "bold"),
-            bg=BG_DARK,
-            fg="#00d4ff",
+            page, text="ℹ️ Informacje o koncie", font=FONT_SECTION,
+            bg=BG_DARK, fg=FG_CYAN,
         ).pack(padx=14, pady=(14, 6), anchor=tk.W)
 
         self.info_text = tk.Text(
             page,
-            font=("Menlo", 12),
+            font=FONT_MONO,
             bg=BG_DARK,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
             wrap=tk.WORD,
             state=tk.DISABLED,
             relief="flat",
             bd=8,
-            insertbackground="#ffffff",
+            insertbackground=FG_WHITE,
         )
         info_sb = tk.Scrollbar(page, command=self.info_text.yview)
         self.info_text.configure(yscrollcommand=info_sb.set)
@@ -2239,17 +2273,17 @@ class App:
         self.info_text.pack(fill=tk.BOTH, expand=True)
 
         for tag, color in [
-            ("label", "#55aaff"),
-            ("value", "#e0e0e0"),
-            ("highlight", "#00ff88"),
-            ("warning", "#ffaa00"),
+            ("label", FG_INFO),
+            ("value", FG_TEXT),
+            ("highlight", FG_SUCCESS),
+            ("warning", FG_WARNING),
         ]:
             self.info_text.tag_config(tag, foreground=color)
 
         bot = tk.Frame(page, bg=BG_DARK)
         bot.pack(fill=tk.X, padx=10, pady=(4, 10))
         self._make_btn(
-            bot, "🔄 Odśwież info", ACCENT, "#1d4ed8", self._fetch_account_info
+            bot, "🔄 Odśwież info", ACCENT, ACCENT_HOVER, self._fetch_account_info
         ).pack(side=tk.LEFT, padx=(0, 4), ipady=3, ipadx=6)
 
     # ── Page 6: Settings ──────────────────────────────────
@@ -2259,26 +2293,16 @@ class App:
         self.tab_pages.append(page)
 
         tk.Label(
-            page,
-            text="⚙️ Ustawienia",
-            font=("Helvetica", 16, "bold"),
-            bg=BG_DARK,
-            fg="#00d4ff",
+            page, text="⚙️ Ustawienia", font=FONT_SECTION,
+            bg=BG_DARK, fg=FG_CYAN,
         ).pack(padx=14, pady=(14, 10), anchor=tk.W)
 
         # Verbose logs checkbox
         cb_frame = tk.Frame(page, bg=BG_DARK)
         cb_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
-        tk.Checkbutton(
-            cb_frame,
-            text="Pokaż pełne zapytania i odpowiedzi w logach",
-            variable=self.verbose_logs_var,
-            bg=BG_DARK,
-            fg="#d0d0e8",
-            selectcolor=BG_INPUT,
-            activebackground=BG_DARK,
-            activeforeground="#ffffff",
-            font=("Helvetica", 12),
+        self._make_checkbox(
+            cb_frame, "Pokaż pełne zapytania i odpowiedzi w logach",
+            self.verbose_logs_var, bg=BG_DARK, fg=FG_LIGHT, font_size=12
         ).pack(anchor=tk.W)
         tk.Label(
             cb_frame,
@@ -2295,17 +2319,10 @@ class App:
         # Debug console checkbox
         dbg_frame = tk.Frame(page, bg=BG_DARK)
         dbg_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
-        tk.Checkbutton(
-            dbg_frame,
-            text="Tryb debug (konsola) — pokazuj wyjątki mpv/DLL w konsoli",
-            variable=self.debug_console_var,
-            command=self._on_debug_console_toggle,
-            bg=BG_DARK,
-            fg="#d0d0e8",
-            selectcolor=BG_INPUT,
-            activebackground=BG_DARK,
-            activeforeground="#ffffff",
-            font=("Helvetica", 12),
+        self._make_checkbox(
+            dbg_frame, "Tryb debug (konsola) — pokazuj wyjątki mpv/DLL w konsoli",
+            self.debug_console_var, bg=BG_DARK, fg=FG_LIGHT, font_size=12,
+            command=self._on_debug_console_toggle
         ).pack(anchor=tk.W)
         tk.Label(
             dbg_frame,
@@ -2330,7 +2347,7 @@ class App:
             proxy_cb_frame,
             text="🔒 Skanowanie TYLKO przez proxy",
             bg=BG_DARK,
-            fg="#55aaff",
+            fg=FG_INFO,
             font=("Helvetica", 12, "bold"),
         ).pack(anchor=tk.W)
         tk.Label(
@@ -2357,29 +2374,19 @@ class App:
             text="📁 Folder zapisu danych:",
             font=("Helvetica", 12, "bold"),
             bg=BG_DARK,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
         ).pack(anchor=tk.W)
 
         row = tk.Frame(folder_frame, bg=BG_DARK)
         row.pack(fill=tk.X, pady=(4, 0))
-        self.save_folder_entry = tk.Entry(
-            row,
-            font=("Helvetica", 11),
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-        )
+        self.save_folder_entry = self._make_entry(row)
         self.save_folder_entry.pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=4
         )
         if self.save_folder:
             self.save_folder_entry.insert(0, self.save_folder)
         self._make_btn(
-            row, "📂 Wybierz", ACCENT, "#1d4ed8", self._choose_save_folder
+            row, "📂 Wybierz", ACCENT, ACCENT_HOVER, self._choose_save_folder
         ).pack(side=tk.LEFT, ipady=3, ipadx=6)
 
         tk.Label(
@@ -2402,8 +2409,8 @@ class App:
         self._make_btn(
             cache_frame,
             "🗑 Wyczyść cache kanałów",
-            "#cc3333",
-            "#aa2222",
+            BTN_DANGER,
+            BTN_DANGER_HOVER,
             self._clear_channels_cache,
         ).pack(anchor=tk.W, ipady=3, ipadx=6)
         tk.Label(
@@ -2431,20 +2438,9 @@ class App:
             text="GitHub token:",
             font=("Helvetica", 11, "bold"),
             bg=BG_DARK,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
         ).grid(row=0, column=0, sticky="w", pady=(6, 0))
-        self.github_token_entry = tk.Entry(
-            form,
-            font=("Helvetica", 11),
-            bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
-            relief="flat",
-            highlightthickness=1,
-            highlightcolor=ACCENT,
-            highlightbackground="#333355",
-            show="*",
-        )
+        self.github_token_entry = self._make_entry(form, show="*")
         self.github_token_entry.grid(
             row=0, column=1, sticky="we", padx=(6, 0), pady=(6, 0), ipady=2
         )
@@ -2456,9 +2452,9 @@ class App:
             text="💾 Zapisz",
             font=("Helvetica", 10, "bold"),
             bg=ACCENT,
-            fg="#ffffff",
-            activebackground="#1d4ed8",
-            activeforeground="#ffffff",
+            fg=FG_WHITE,
+            activebackground=ACCENT_HOVER,
+            activeforeground=FG_WHITE,
             relief="flat",
             cursor="hand2",
             command=self._save_github_token,
@@ -2466,7 +2462,7 @@ class App:
         save_tok_btn.grid(row=0, column=2, padx=(6, 0), pady=(6, 0), ipady=1, ipadx=4)
 
         self.token_status_label = tk.Label(
-            form, text="", font=("Helvetica", 10), bg=BG_DARK, fg="#4ade80"
+            form, text="", font=("Helvetica", 10), bg=BG_DARK, fg=FG_SUCCESS_SOFT
         )
         self.token_status_label.grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(2, 0)
@@ -2478,7 +2474,7 @@ class App:
             update_frame,
             "⬇️ Auto aktualizacja (GitHub)",
             ACCENT,
-            "#1d4ed8",
+            ACCENT_HOVER,
             self._auto_update_from_github,
         ).pack(anchor=tk.W, ipady=3, ipadx=6)
         tk.Label(
@@ -2497,7 +2493,7 @@ class App:
         ).pack(anchor=tk.W, pady=(4, 0))
 
     def _sep_dark(self, parent):
-        tk.Frame(parent, height=1, bg="#333355").pack(fill=tk.X, padx=20, pady=8)
+        tk.Frame(parent, height=1, bg=BORDER).pack(fill=tk.X, padx=20, pady=8)
 
     def _choose_save_folder(self):
         folder = filedialog.askdirectory(
@@ -2513,12 +2509,12 @@ class App:
         """Encrypt and persist the GitHub token immediately."""
         token = self.github_token_entry.get().strip()
         if not token:
-            self.token_status_label.config(text="⚠️ Token jest pusty", fg="#facc15")
+            self.token_status_label.config(text="⚠️ Token jest pusty", fg=FG_CAUTION)
             return
         self.github_token = token
         self._save_session()
         self.token_status_label.config(
-            text="✅ Klucz zaszyfrowany i zapisany", fg="#4ade80"
+            text="✅ Klucz zaszyfrowany i zapisany", fg=FG_SUCCESS_SOFT
         )
         self._log("GitHub token zapisany (zaszyfrowany).", "success")
 
@@ -2639,7 +2635,7 @@ class App:
             text="🔄 Nowa wersja Flipper!",
             font=("Helvetica", 16, "bold"),
             bg=BG_DARK,
-            fg="#00d4ff",
+            fg=FG_CYAN,
         ).pack(pady=(16, 4))
 
         tk.Label(
@@ -2647,7 +2643,7 @@ class App:
             text=f"Obecna: {local_ver}  →  Nowa: {remote_ver}",
             font=("Helvetica", 12),
             bg=BG_DARK,
-            fg="#aaaaaa",
+            fg=FG_MUTED,
         ).pack(pady=(0, 8))
 
         tk.Label(
@@ -2655,7 +2651,7 @@ class App:
             text="Co nowego:",
             font=("Helvetica", 11, "bold"),
             bg=BG_DARK,
-            fg="#c8c8e0",
+            fg=FG_LABEL,
             anchor=tk.W,
         ).pack(fill=tk.X, padx=20, pady=(4, 2))
 
@@ -2667,7 +2663,7 @@ class App:
             changes_frame,
             font=("Helvetica", 10),
             bg=BG_INPUT,
-            fg="#d0d0e8",
+            fg=FG_LIGHT,
             wrap=tk.WORD,
             relief="flat",
             bd=2,
@@ -2695,9 +2691,9 @@ class App:
             self._log("Aktualizacja pominięta.", "dim")
 
         self._make_btn(
-            btn_frame, "✅ Aktualizuj", "#00b359", "#009945", _do_update
+            btn_frame, "✅ Aktualizuj", BTN_SUCCESS, BTN_SUCCESS_HOVER, _do_update
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4), ipady=6)
-        self._make_btn(btn_frame, "❌ Pomiń", "#cc3333", "#aa2222", _skip).pack(
+        self._make_btn(btn_frame, "❌ Pomiń", BTN_DANGER, BTN_DANGER_HOVER, _skip).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0), ipady=6
         )
 
@@ -2850,47 +2846,63 @@ class App:
     #  WIDGET HELPERS
     # ══════════════════════════════════════════════════════
 
-    def _entry(self, parent, default=""):
-        e = tk.Entry(
-            parent,
+    def _make_entry(self, parent, width=None, default="", show=None):
+        kwargs = dict(
             font=("Helvetica", 11),
             bg=BG_INPUT,
-            fg="#e0e0e0",
-            insertbackground="#ffffff",
+            fg=FG_TEXT,
+            insertbackground=FG_WHITE,
             relief="flat",
             highlightthickness=1,
             highlightcolor=ACCENT,
-            highlightbackground="#333355",
+            highlightbackground=BORDER,
         )
-        e.pack(fill=tk.X, padx=16, pady=(2, 6), ipady=4)
+        if width is not None:
+            kwargs["width"] = width
+        if show is not None:
+            kwargs["show"] = show
+        e = tk.Entry(parent, **kwargs)
         if default:
             e.insert(0, default)
         return e
 
+    def _entry(self, parent, default=""):
+        e = self._make_entry(parent, default=default)
+        e.pack(fill=tk.X, padx=16, pady=(2, 6), ipady=4)
+        return e
+
+    def _make_checkbox(self, parent, text, variable, bg=None, fg=None,
+                       font_size=10, command=None):
+        bg = bg or BG_SIDEBAR
+        fg = fg or FG_MUTED
+        kwargs = dict(
+            text=text,
+            variable=variable,
+            bg=bg,
+            fg=fg,
+            selectcolor=BG_INPUT,
+            activebackground=bg,
+            activeforeground=FG_SUBTLE,
+            font=("Helvetica", font_size),
+        )
+        if command is not None:
+            kwargs["command"] = command
+        return tk.Checkbutton(parent, **kwargs)
+
     def _lbl(self, parent, text):
         tk.Label(
-            parent,
-            text=text,
-            font=("Helvetica", 11, "bold"),
-            bg=BG_SIDEBAR,
-            fg="#c8c8e0",
-            anchor=tk.W,
+            parent, text=text, font=FONT_SMALL_BOLD,
+            bg=BG_SIDEBAR, fg=FG_LABEL, anchor=tk.W,
         ).pack(fill=tk.X, padx=18, pady=(2, 0))
 
     def _sep(self, parent):
-        tk.Frame(parent, height=1, bg="#333355").pack(fill=tk.X, padx=14, pady=6)
+        tk.Frame(parent, height=1, bg=BORDER).pack(fill=tk.X, padx=14, pady=6)
 
     def _make_btn(self, parent, text, bg_color, hover_color, command):
         lbl = tk.Label(
-            parent,
-            text=text,
-            font=("Helvetica", 11, "bold"),
-            bg=bg_color,
-            fg="white",
-            cursor="hand2",
-            anchor=tk.CENTER,
-            padx=6,
-            pady=2,
+            parent, text=text, font=FONT_MAIN_BOLD,
+            bg=bg_color, fg="white", cursor="hand2",
+            anchor=tk.CENTER, padx=8, pady=3,
         )
         lbl._normal_bg = bg_color
         lbl._hover_bg = hover_color
@@ -2913,18 +2925,91 @@ class App:
 
     def _btn_disable(self, btn):
         btn._enabled = False
-        btn.configure(bg="#444444", fg="#888888", cursor="arrow")
+        btn.configure(bg=BTN_DISABLED, fg=FG_DIM, cursor="arrow")
+
+    def _make_context_menu(self, items):
+        menu = tk.Menu(
+            self.root, tearoff=0, bg=BG_INPUT, fg=FG_TEXT,
+            activebackground=ACCENT, activeforeground=FG_WHITE,
+            font=FONT_SMALL, bd=1, relief="solid",
+        )
+        for item in items:
+            if item == "---":
+                menu.add_separator()
+            else:
+                label, cmd = item
+                menu.add_command(label=label, command=cmd)
+        return menu
+
+    def _show_context_menu(self, event, menu):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _treeview_context(self, event, tree, menu):
+        item = tree.identify_row(event.y)
+        if item:
+            tree.selection_set(item)
+            self._show_context_menu(event, menu)
+
+    # ── Tab badge notifications ────────────────────────
+    def _set_tab_badge(self, tab_idx, count):
+        if tab_idx == self.current_tab:
+            return
+        self._tab_badges[tab_idx] = self._tab_badges.get(tab_idx, 0) + count
+        badge = self._tab_badge_labels[tab_idx]
+        badge.configure(text=str(self._tab_badges[tab_idx]))
+        badge.pack(side=tk.LEFT, padx=(2, 0))
+
+    def _clear_tab_badge(self, tab_idx):
+        self._tab_badges.pop(tab_idx, None)
+        self._tab_badge_labels[tab_idx].pack_forget()
+
+    # ── Status bar updates ─────────────────────────────
+    def _update_status_bar(self):
+        if not self.is_running:
+            self.status_speed_label.configure(text="")
+            self.status_current_proxy.configure(text="")
+            return
+
+        # Scan speed
+        if self._scan_start_time and self.checked_count > 0:
+            elapsed = time.time() - self._scan_start_time
+            if elapsed > 0:
+                speed = self.checked_count / elapsed
+                mins = int(elapsed) // 60
+                secs = int(elapsed) % 60
+                self.status_speed_label.configure(
+                    text=f"{speed:.1f} MAC/s  |  {mins:02d}:{secs:02d}"
+                )
+
+        # Proxy info
+        proxy_list = get_proxy_list()
+        usable = get_usable_proxy_count()
+        current = get_current_proxy()
+        self.status_proxy_label.configure(text=f"Proxy: {usable}/{len(proxy_list)}")
+        if current:
+            short = current.replace("http://", "")
+            self.status_current_proxy.configure(text=f"→ {short}")
+        else:
+            self.status_current_proxy.configure(text="")
+
+        # Re-schedule if still running
+        if self.is_running:
+            self._status_update_timer = self.root.after(1000, self._update_status_bar)
 
     def _switch_tab(self, idx):
         self.current_tab = idx
+        self._clear_tab_badge(idx)
         for i, (btn, pg) in enumerate(zip(self.tab_btns, self.tab_pages)):
             if i == idx:
                 btn._normal_bg = ACCENT
                 btn.configure(bg=ACCENT)
                 pg.lift()
             else:
-                btn._normal_bg = "#333355"
-                btn.configure(bg="#333355")
+                btn._normal_bg = BORDER
+                btn.configure(bg=BORDER)
         if idx == 3:
             self.sidebar_player.lift()
             self._refresh_player_mac_list()
@@ -2939,8 +3024,8 @@ class App:
                 btn.configure(bg=ACCENT)
                 pg.lift()
             else:
-                btn._normal_bg = "#333355"
-                btn.configure(bg="#333355")
+                btn._normal_bg = BORDER
+                btn.configure(bg=BORDER)
 
     # ══════════════════════════════════════════════════════
     #  PROGRESS BAR
@@ -3019,7 +3104,7 @@ class App:
     def _update_stats_safe(self):
         self.root.after(0, self._update_stats)
 
-    def _set_status(self, text, color="#666666"):
+    def _set_status(self, text, color=FG_INACTIVE):
         self.root.after(
             0, lambda: self.stat_status.configure(text=f"Status: {text}", fg=color)
         )
@@ -3063,6 +3148,8 @@ class App:
         if proxy:
             self.mac_proxy_map[mac] = proxy
         self.root.after(0, self._insert_mac_row, entry)
+        # Badge on MAC tab (index 1) if not currently viewing it
+        self.root.after(0, lambda: self._set_tab_badge(1, 1))
 
     def _insert_mac_row(self, entry):
         self.tree.insert(
@@ -3755,12 +3842,45 @@ class App:
         return 500  # default
 
     def _fetch_only_worker(self):
-        """Fetch proxies from APIs and add them with 'untested' tag.
-        Stops once max proxy count is reached."""
+        """Fetch proxies from APIs, test each for latency, add only working ones.
+        Tests against the server URL if set, otherwise httpbin.
+        Respects max proxy count."""
         self._proxy_fetching = True
         self._proxy_testing = True
+        self._proxy_stop.clear()
+        self._proxy_paused.set()
+        self.root.after(0, lambda: self._btn_enable(self.proxy_pause_btn))
+
         max_count = self._get_max_proxy_count()
-        self._log_safe(f"Pobieranie proxy z API (maks: {max_count})...", "info")
+        max_lat = self._get_max_latency()
+        existing = set(get_proxy_list())
+        need = max(0, max_count - len(existing))
+
+        if need == 0:
+            self._log_safe(
+                f"Już masz {len(existing)} proxy (limit: {max_count}).", "info"
+            )
+            self._proxy_testing = False
+            self._proxy_fetching = False
+            self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
+            return
+
+        # Build test URL: use server URL if set, otherwise httpbin
+        server_url = None
+        try:
+            raw_url = self.url_entry.get().strip()
+            if raw_url:
+                server_url = parse_url(raw_url)
+        except Exception:
+            pass
+        test_target = server_url or "http://httpbin.org/ip"
+        target_label = server_url or "httpbin.org"
+
+        self._log_safe(
+            f"Pobieranie proxy (potrzeba: {need}, limit opóźn.: {max_lat}s, "
+            f"test: {target_label})...", "info"
+        )
+        self._set_progress(5, "Pobieranie proxy z API...")
 
         def _fetch_cb(source, new, total):
             self.root.after(
@@ -3770,46 +3890,125 @@ class App:
                 ),
             )
 
-        proxies = fetch_free_proxies(callback=_fetch_cb, max_count=max_count)
+        # Fetch more than needed — many will fail the test
+        fetch_count = need * 5
+        proxies = fetch_free_proxies(callback=_fetch_cb, max_count=fetch_count)
 
         if not proxies:
             self._log_safe("Nie udało się pobrać proxy.", "error")
             self._set_progress(100, "Błąd pobierania proxy")
             self._proxy_testing = False
             self._proxy_fetching = False
+            self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
             return
 
-        # Add fetched proxies to the list with "untested" tag
-        added = 0
-        existing = set(get_proxy_list())
-        for p in proxies:
-            if p not in existing:
-                add_proxy(p)
-                existing.add(p)
-                added += 1
+        # Filter out already-known proxies
+        candidates = [p for p in proxies if p not in existing]
+        total_candidates = len(candidates)
+        self._log_safe(
+            f"Pobrano {len(proxies)} proxy, {total_candidates} nowych. "
+            f"Testowanie (szukam {need} działających)...", "info"
+        )
+        self._set_progress(15, f"Szukam 0/{need} proxy...")
 
-        self.root.after(0, self._refresh_proxy_tree)
+        accepted = 0
+        tested = 0
+        self._proxy_latencies = getattr(self, "_proxy_latencies", {})
+
+        for proxy in candidates:
+            if self._proxy_stop.is_set():
+                self._log_safe("Pobieranie proxy przerwane.", "warning")
+                break
+            self._proxy_paused.wait()
+            if self._proxy_stop.is_set():
+                break
+
+            # Got enough?
+            if accepted >= need:
+                self._log_safe(
+                    f"Osiągnięto limit {max_count} proxy.", "info"
+                )
+                break
+
+            tested += 1
+            latency = test_proxy_latency(proxy, timeout=max_lat + 1,
+                                         test_url=test_target)
+            ok = latency <= max_lat
+            lat_str = f"{latency:.2f}s" if latency != float("inf") else "timeout"
+
+            if ok:
+                accepted += 1
+                add_proxy(proxy)
+                self._proxy_latencies[proxy] = latency
+                set_proxy_tag(proxy, PROXY_TAG_WORKING)
+                self.root.after(0, self._add_proxy_to_tree, proxy, latency)
+                if accepted % 10 == 0:
+                    self._save_proxies_to_file()
+
+            pct = int(15 + (accepted / max(need, 1)) * 80)
+            self._set_progress(pct, f"Znaleziono {accepted}/{need} proxy")
+            self.root.after(
+                0,
+                lambda p=proxy, ls=lat_str, a=accepted, n=need, o=ok: (
+                    self.proxy_test_progress_label.configure(
+                        text=f"{p} → {ls} {'✓' if o else '✗'}  |  Znaleziono: {a}/{n}"
+                    )
+                ),
+            )
+            self.root.after(
+                0,
+                lambda c=len(get_proxy_list()): self.proxy_count_label.configure(
+                    text=f"Proxy: {c}"
+                ),
+            )
+
         self._save_proxies_to_file()
         self._save_proxy_state()
+        self.root.after(0, self._refresh_proxy_tree)
         total_now = len(get_proxy_list())
-        self._log_safe(
-            f"Pobrano {len(proxies)} proxy, dodano {added} nowych. "
-            f"Łącznie: {total_now}. Użyj 'Testuj proxy' aby zweryfikować.",
-            "success",
-        )
-        self._set_progress(100, f"{total_now} proxy pobrano")
+
+        if accepted > 0:
+            self._log_safe(
+                f"✅ {accepted}/{tested} proxy OK (≤ {max_lat}s, "
+                f"test: {target_label}). Łącznie: {total_now}/{max_count}.",
+                "success",
+            )
+            self._set_progress(100, f"{total_now}/{max_count} proxy")
+        else:
+            self._log_safe(
+                f"❌ Żadne proxy nie przeszło testu (≤ {max_lat}s)!", "error"
+            )
+            self._set_progress(100, "Brak proxy")
+
         self.root.after(0, lambda: self.proxy_test_progress_label.configure(text=""))
+        self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
+        self.root.after(0, lambda: self.proxy_pause_btn.configure(text="⏸ Pauza"))
         self._proxy_testing = False
         self._proxy_fetching = False
 
     def _fetch_proxies_worker(self):
+        """Re-test: clears proxy list, fetches fresh proxies, tests against server URL."""
         max_lat = self._get_max_latency()
+        max_count = self._get_max_proxy_count()
         self._proxy_testing = True
         self._proxy_stop.clear()
         self._proxy_paused.set()
         self.root.after(0, lambda: self._btn_enable(self.proxy_pause_btn))
+
+        # Test URL: server if set, else httpbin
+        server_url = None
+        try:
+            raw_url = self.url_entry.get().strip()
+            if raw_url:
+                server_url = parse_url(raw_url)
+        except Exception:
+            pass
+        test_target = server_url or "http://httpbin.org/ip"
+        target_label = server_url or "httpbin.org"
+
         self._log_safe(
-            f"Pobieranie proxy z API (maks. opóźnienie: {max_lat}s)...", "info"
+            f"Pobieranie proxy (maks: {max_count}, opóźn. ≤ {max_lat}s, "
+            f"test: {target_label})...", "info"
         )
 
         def _fetch_cb(source, new, total):
@@ -3820,7 +4019,8 @@ class App:
                 ),
             )
 
-        proxies = fetch_free_proxies(callback=_fetch_cb)
+        fetch_count = max_count * 5
+        proxies = fetch_free_proxies(callback=_fetch_cb, max_count=fetch_count)
         if not proxies:
             self._log_safe("Nie udało się pobrać proxy.", "error")
             self._set_progress(100, "Błąd pobierania proxy")
@@ -3828,13 +4028,16 @@ class App:
             self.root.after(0, lambda: self._btn_disable(self.proxy_pause_btn))
             return
 
-        total = len(proxies)
-        self._log_safe(f"Pobrano {total} proxy. Testowanie pojedynczo...", "info")
-        self._set_progress(25, f"Testowanie {total} proxy...")
+        total_candidates = len(proxies)
+        self._log_safe(
+            f"Pobrano {total_candidates} proxy. Szukam {max_count} działających...",
+            "info",
+        )
+        self._set_progress(25, f"Szukam 0/{max_count} proxy...")
         self.root.after(
             0,
             lambda: self.proxy_test_progress_label.configure(
-                text=f"Testowanie 0/{total} proxy..."
+                text=f"Szukam 0/{max_count} proxy..."
             ),
         )
 
@@ -3844,56 +4047,60 @@ class App:
         tested_count = 0
 
         for i, proxy in enumerate(proxies):
-            # Check stop
             if self._proxy_stop.is_set():
                 self._log_safe("Testowanie proxy przerwane.", "warning")
                 break
-            # Check pause — block until resumed
             self._proxy_paused.wait()
             if self._proxy_stop.is_set():
                 break
 
+            if max_count > 0 and accepted_count >= max_count:
+                self._log_safe(
+                    f"Osiągnięto limit {max_count} proxy.", "info",
+                )
+                break
+
             tested_count += 1
-            latency = test_proxy_latency(proxy, timeout=max_lat + 1)
+            latency = test_proxy_latency(proxy, timeout=max_lat + 1,
+                                         test_url=test_target)
+            ok = latency <= max_lat
             lat_str = f"{latency:.2f}s" if latency != float("inf") else "timeout"
 
-            pct = int(25 + (tested_count / total) * 65)
-            self._set_progress(pct, f"Test proxy {tested_count}/{total}")
-            self.root.after(
-                0,
-                lambda p=proxy, ls=lat_str, t=tested_count: (
-                    self.proxy_test_progress_label.configure(
-                        text=f"{t}/{total} — {p} → {ls}"
-                    )
-                ),
-            )
-
-            if latency <= max_lat:
+            if ok:
                 accepted_count += 1
                 add_proxy(proxy)
+                set_proxy_tag(proxy, PROXY_TAG_WORKING)
                 self._proxy_latencies[proxy] = latency
-                # Add to tree immediately
                 self.root.after(0, self._add_proxy_to_tree, proxy, latency)
-                self.root.after(
-                    0,
-                    lambda c=accepted_count: self.proxy_count_label.configure(
-                        text=f"Proxy: {c}"
-                    ),
-                )
-                # Save to file every 10 accepted proxies
                 if accepted_count % 10 == 0:
                     self._save_proxies_to_file()
 
-        # Final save
+            pct = int(25 + (accepted_count / max(max_count, 1)) * 70)
+            self._set_progress(pct, f"Znaleziono {accepted_count}/{max_count} proxy")
+            self.root.after(
+                0,
+                lambda p=proxy, ls=lat_str, a=accepted_count, m=max_count, o=ok: (
+                    self.proxy_test_progress_label.configure(
+                        text=f"{p} → {ls} {'✓' if o else '✗'}  |  Znaleziono: {a}/{m}"
+                    )
+                ),
+            )
+            self.root.after(
+                0,
+                lambda c=accepted_count: self.proxy_count_label.configure(
+                    text=f"Proxy: {c}"
+                ),
+            )
+
         self._save_proxies_to_file()
 
         if accepted_count > 0:
             self._log_safe(
                 f"✅ {accepted_count}/{tested_count} proxy OK "
-                f"(opóźnienie ≤ {max_lat}s).",
+                f"(≤ {max_lat}s, test: {target_label}).",
                 "success",
             )
-            self._set_progress(100, f"{accepted_count} proxy gotowych")
+            self._set_progress(100, f"{accepted_count}/{max_count} proxy")
         else:
             self._log_safe(f"❌ Żadne proxy nie spełnia limitu {max_lat}s!", "error")
             set_proxy_list([])
@@ -3978,6 +4185,15 @@ class App:
         remove_proxy(val)
         self._refresh_proxy_tree()
         self._log(f"Usunięto proxy: {val}", "info")
+
+    def _copy_selected_proxy(self):
+        sel = self.proxy_tree.selection()
+        if not sel:
+            return
+        val = self.proxy_tree.item(sel[0], "values")[0]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(val)
+        self._log(f"Skopiowano proxy: {val}", "info")
 
     def _handle_proxy_fail(self, proxy, status_code=0):
         if not proxy:
@@ -4068,7 +4284,7 @@ class App:
         self._deep_proxy_stop.clear()
         self._deep_proxy_paused.set()
         self.root.after(0, lambda: self.deep_test_btn.configure(text="⏸ Pauza testu"))
-        self.root.after(0, lambda: self.deep_test_btn._normal_bg == "#c78d00")
+        self.root.after(0, lambda: self.deep_test_btn._normal_bg == BTN_WARNING)
 
         server_address = parse_url(url_raw)
         threading.Thread(
@@ -4490,11 +4706,11 @@ class App:
             status = self.mac_status.get(mac)
             if status == "green":
                 self.player_mac_listbox.itemconfigure(
-                    i, fg="#00ff88", selectforeground="#00ff88"
+                    i, fg=FG_SUCCESS, selectforeground=FG_SUCCESS
                 )
             elif status == "red":
                 self.player_mac_listbox.itemconfigure(
-                    i, fg="#ff4444", selectforeground="#ff4444"
+                    i, fg=FG_ERROR, selectforeground=FG_ERROR
                 )
 
     def _set_mac_status(self, mac, status):
@@ -4612,12 +4828,12 @@ class App:
         for ct, btn in self.content_type_btns:
             if ct == ctype:
                 btn._normal_bg = ACCENT
-                btn._hover_bg = "#1d4ed8"
+                btn._hover_bg = ACCENT_HOVER
                 btn.configure(bg=ACCENT)
             else:
-                btn._normal_bg = "#333355"
-                btn._hover_bg = "#444466"
-                btn.configure(bg="#333355")
+                btn._normal_bg = BORDER
+                btn._hover_bg = BTN_DEFAULT_HOVER
+                btn.configure(bg=BORDER)
         self._fetch_channels()
 
     def _on_genre_change(self, *args):
@@ -4647,6 +4863,14 @@ class App:
         else:
             self._fetch_channels()
         self._update_nav_ui()
+
+    def _play_selected_channel(self):
+        sel = self.channel_tree.selection()
+        if not sel:
+            return
+        ch = self._get_channel_for_tree_item(sel[0])
+        if ch and ch.get("cmd"):
+            self._play_channel_entry(ch)
 
     def _on_channel_double_click(self, event):
         sel = self.channel_tree.selection()
@@ -5537,13 +5761,17 @@ class App:
         self.pause_event.set()
         self.checked_count = 0
         self.found_count = 0
+        self._scan_start_time = time.time()
         self._update_stats()
 
         self._btn_disable(self.start_btn)
         self._btn_enable(self.pause_btn)
         self._btn_enable(self.stop_btn)
-        self._set_status("Uruchamianie...", "#ffaa00")
+        self._set_status("Uruchamianie...", FG_WARNING)
         self._set_progress(5, "Uruchamianie skanera...")
+
+        # Start status bar live updates
+        self._update_status_bar()
 
         server_address = parse_url(url_raw)
         self.scan_thread = threading.Thread(
@@ -5557,7 +5785,7 @@ class App:
         # Pre-scan: ensure proxies are available
         if not get_proxy_list():
             self._log_safe("Brak proxy — automatyczne pobieranie...", "info")
-            self._set_status("Pobieranie proxy...", "#55aaff")
+            self._set_status("Pobieranie proxy...", FG_INFO)
             self._set_progress(5, "Pobieranie proxy...")
             self._fetch_only_worker()
 
@@ -5578,7 +5806,7 @@ class App:
             f"(proxy: {len(get_proxy_list())})...",
             "info",
         )
-        self._set_status("Szukanie endpoint-u...", "#55aaff")
+        self._set_status("Szukanie endpoint-u...", FG_INFO)
         self._set_progress(15, "Szukanie endpoint-u...")
 
         # Use the full proxy retry helper
@@ -5597,7 +5825,7 @@ class App:
         self._log_safe(f"Endpoint: {url}", "success")
         if proxy:
             self._log_safe(f"Proxy: {proxy}", "info")
-        self._set_status("Skanowanie...", "#00ff88")
+        self._set_status("Skanowanie...", FG_SUCCESS)
         self._set_progress(30, "Skanowanie...")
 
         self.executor = ThreadPoolExecutor(max_workers=workers)
@@ -5765,7 +5993,22 @@ class App:
             return
         self.is_running = False
         self.is_paused = False
-        self._set_status("Zakończono", "#888888")
+
+        # Stop status bar timer
+        if self._status_update_timer:
+            self.root.after_cancel(self._status_update_timer)
+            self._status_update_timer = None
+
+        # Final speed display
+        elapsed = time.time() - self._scan_start_time if self._scan_start_time else 0
+        mins, secs = divmod(int(elapsed), 60)
+        speed = self.checked_count / elapsed if elapsed > 0 else 0
+        self.root.after(0, lambda: self.status_speed_label.configure(
+            text=f"{speed:.1f} MAC/s  |  {mins:02d}:{secs:02d}  (gotowe)"
+        ))
+        self._scan_start_time = None
+
+        self._set_status("Zakończono", FG_DIM)
         self._set_progress(100, "Skanowanie zakończone")
         self.root.after(0, self._reset_buttons)
         self._log_safe(
@@ -5787,18 +6030,18 @@ class App:
         if self.is_paused:
             self.is_paused = False
             self.pause_event.set()
-            self.pause_btn._normal_bg = "#c78d00"
-            self.pause_btn._hover_bg = "#a87600"
-            self.pause_btn.configure(text="⏸ PAUZA", bg="#c78d00")
-            self._set_status("Skanowanie...", "#00ff88")
+            self.pause_btn._normal_bg = BTN_WARNING
+            self.pause_btn._hover_bg = BTN_WARNING_HOVER
+            self.pause_btn.configure(text="⏸ PAUZA", bg=BTN_WARNING)
+            self._set_status("Skanowanie...", FG_SUCCESS)
             self._log("▶  Wznowiono.", "info")
         else:
             self.is_paused = True
             self.pause_event.clear()
-            self.pause_btn._normal_bg = "#00b359"
-            self.pause_btn._hover_bg = "#009945"
-            self.pause_btn.configure(text="▶ WZNÓW", bg="#00b359")
-            self._set_status("Wstrzymano", "#ffaa00")
+            self.pause_btn._normal_bg = BTN_SUCCESS
+            self.pause_btn._hover_bg = BTN_SUCCESS_HOVER
+            self.pause_btn.configure(text="▶ WZNÓW", bg=BTN_SUCCESS)
+            self._set_status("Wstrzymano", FG_WARNING)
             self._log("⏸  Pauza.", "warning")
 
     def _stop_scan(self):
@@ -5810,7 +6053,7 @@ class App:
         # Immediately reset state and buttons
         self.is_running = False
         self.is_paused = False
-        self._set_status("Zatrzymano", "#888888")
+        self._set_status("Zatrzymano", FG_DIM)
         self.root.after(0, self._reset_buttons)
 
     # ══════════════════════════════════════════════════════

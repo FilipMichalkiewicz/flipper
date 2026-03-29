@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Users/Filip/Desktop/flipper/*.py)",
+      "Bash(python -m pytest tests/test_scanner.py -v)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(curl:*)",
+      "Bash(gh auth:*)",
+      "WebSearch",
+      "Bash(git add:*)"
+    ]
+  }
+}
