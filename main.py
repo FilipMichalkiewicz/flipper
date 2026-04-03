@@ -1471,13 +1471,17 @@ class App:
             cb_frame, "Na wierzchu", self.keep_on_top_var, command=self._toggle_keep_on_top
         ).pack(side=tk.LEFT, padx=(6, 0))
 
-        # Proxy info label (scanning is always via proxy)
-        tk.Label(
+        # Proxy toggle for scanning
+        tk.Checkbutton(
             cb_frame,
-            text="🔒 Proxy",
-            font=("Helvetica", 10, "bold"),
+            text="🌐 Proxy",
+            variable=self.use_proxy_var,
             bg=BG_SIDEBAR,
             fg=FG_INFO,
+            selectcolor=BG_SIDEBAR,
+            activebackground=BG_SIDEBAR,
+            activeforeground=FG_INFO,
+            font=("Helvetica", 10, "bold"),
         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # Min channels filter
@@ -2340,22 +2344,27 @@ class App:
 
         self._sep_dark(page)
 
-        # Proxy info section (proxy-only mode)
+        # Proxy toggle section
         proxy_cb_frame = tk.Frame(page, bg=BG_DARK)
         proxy_cb_frame.pack(fill=tk.X, padx=20, pady=(4, 6))
-        tk.Label(
+        tk.Checkbutton(
             proxy_cb_frame,
-            text="🔒 Skanowanie TYLKO przez proxy",
+            text="🌐 Używaj proxy przy skanowaniu",
+            variable=self.use_proxy_var,
             bg=BG_DARK,
             fg=FG_INFO,
+            selectcolor=BG_DARK,
+            activebackground=BG_DARK,
+            activeforeground=FG_INFO,
             font=("Helvetica", 12, "bold"),
         ).pack(anchor=tk.W)
         tk.Label(
             proxy_cb_frame,
-            text="Skaner zawsze używa proxy. Przed skanowaniem "
+            text="Gdy włączone, skaner używa proxy. Przed skanowaniem "
             "proxy są automatycznie pobierane i testowane. "
             "Wolne proxy (powyżej ustawionego limitu opóźnienia) "
-            "są automatycznie usuwane.",
+            "są automatycznie usuwane. "
+            "Gdy wyłączone, skaner łączy się bezpośrednio.",
             font=("Helvetica", 10),
             bg=BG_DARK,
             fg=FG_DIM,
@@ -3564,7 +3573,9 @@ class App:
     # ══════════════════════════════════════════════════════
 
     def _get_active_proxy(self):
-        """Always returns a proxy — scanning is proxy-only."""
+        """Returns a proxy if proxy use is enabled, else None."""
+        if not self.use_proxy_var.get():
+            return None
         inline = self.proxy_inline_entry.get().strip()
         if inline:
             if not inline.startswith("http"):
@@ -3587,6 +3598,9 @@ class App:
         return self.max_proxy_latency
 
     def _auto_fetch_proxies_on_startup(self):
+        if not self.use_proxy_var.get():
+            self._log("Proxy wyłączone — pomijam auto-pobieranie.", "info")
+            return
         if not get_proxy_list():
             self._log("Auto-pobieranie proxy przy starcie...", "info")
             threading.Thread(target=self._fetch_only_worker, daemon=True).start()
@@ -4492,16 +4506,22 @@ class App:
 
     def _find_endpoint_with_proxy_retry(self, server_address, timeout):
         """Try to find a responding endpoint, cycling through all proxies.
-        Proxy-only: will NOT fall back to direct connection.
+        If proxy is disabled, connects directly.
         Returns (endpoint, proxy_used) or (None, None).
         """
         proxy = self._get_active_proxy()
 
+        if not proxy and not self.use_proxy_var.get():
+            # Direct connection (no proxy)
+            endpoint, ep_code = get_responding_endpoint(
+                server_address, timeout=timeout, proxy=None
+            )
+            return (endpoint, None) if endpoint else (None, None)
+
         if not proxy:
-            # No proxy available — cannot scan without proxy
             self._log_safe(
-                "❌ Brak proxy! Skanowanie wymaga proxy. "
-                "Pobierz proxy w zakładce Proxy.",
+                "❌ Brak proxy! Pobierz proxy w zakładce Proxy "
+                "lub wyłącz proxy w ustawieniach.",
                 "error",
             )
             return None, None
@@ -5782,8 +5802,10 @@ class App:
         self.scan_thread.start()
 
     def _scan_worker(self, server_address, mac_prefix, workers, timeout):
-        # Pre-scan: ensure proxies are available
-        if not get_proxy_list():
+        use_proxy = self.use_proxy_var.get()
+
+        # Pre-scan: ensure proxies are available (only when proxy is enabled)
+        if use_proxy and not get_proxy_list():
             self._log_safe("Brak proxy — automatyczne pobieranie...", "info")
             self._set_status("Pobieranie proxy...", FG_INFO)
             self._set_progress(5, "Pobieranie proxy...")
@@ -5801,11 +5823,17 @@ class App:
                 self._scan_finished()
                 return
 
-        self._log_safe(
-            f"Szukam endpoint-u na {server_address} "
-            f"(proxy: {len(get_proxy_list())})...",
-            "info",
-        )
+        if use_proxy:
+            self._log_safe(
+                f"Szukam endpoint-u na {server_address} "
+                f"(proxy: {len(get_proxy_list())})...",
+                "info",
+            )
+        else:
+            self._log_safe(
+                f"Szukam endpoint-u na {server_address} (bez proxy)...",
+                "info",
+            )
         self._set_status("Szukanie endpoint-u...", FG_INFO)
         self._set_progress(15, "Szukanie endpoint-u...")
 
@@ -5872,22 +5900,23 @@ class App:
 
         mac = generate_random_mac(mac_prefix)
 
-        # Multi-proxy: each worker thread gets its own proxy
-        if self.multi_proxy_var.get():
-            thread_id = threading.current_thread().ident
-            # Use thread-local-like proxy assignment via multiproxy helper
+        # Get proxy (None if proxy is disabled)
+        if not self.use_proxy_var.get():
+            proxy = None
+        elif self.multi_proxy_var.get():
+            # Multi-proxy: each worker thread gets its own proxy
             proxy = get_proxy_for_multiproxy(
                 exclude=getattr(self, "_multiproxy_used", set())
             )
             if proxy:
                 if not hasattr(self, "_multiproxy_used"):
                     self._multiproxy_used = set()
-                # Don't permanently exclude — just prefer different ones
+            if not proxy:
+                proxy = self._get_active_proxy()
         else:
             proxy = self._get_active_proxy()
-
-        if not proxy:
-            proxy = self._get_active_proxy()
+            if not proxy:
+                proxy = self._get_active_proxy()
 
         result = check_mac(url, mac, timeout=timeout, proxy=proxy)
         codes = result.get("codes", [])
